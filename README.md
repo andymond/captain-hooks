@@ -28,7 +28,7 @@ The generated handler lives at `src/webhooks/my_vendor/Handler.kt` and listens a
 
 Delivery is at least once. Async requests return `204` after durable enqueue, and a duplicate of an accepted job returns `204` without starting a new job. Storage failures return `503` so the sender can retry. Worker leases prevent simultaneous claims during the lease. A crash after an external side effect can still cause a retry, so use the delivery ID as an idempotency key.
 
-Sync mode suits short handlers when the sender should see handling failures directly. Archive mode keeps the original bytes for later handling and replay at the cost of storage and retention. Projected mode keeps the queue payload small and can avoid retaining sensitive fields. Its projection runs on the request path and must retain everything the worker will need.
+Sync mode suits short handlers when the sender should see handling failures directly. Archive mode retains the original bytes for later handling or replay, which adds storage and retention costs. Projected mode keeps the queue payload small and can avoid retaining sensitive fields. Its projection runs on the request path and must retain everything the worker will need.
 
 Archive and queue adapters can use different databases. The archive write comes first. If enqueue fails, the original stays available and a retry can safely reuse it.
 
@@ -70,7 +70,7 @@ The signature covers the delivery ID, a newline byte, and the raw body. Use a st
 
 ## Embed in Spring or Ktor
 
-Run `mvn install` from the repository root to install the modules locally. Gradle consumers can add `mavenLocal()`. All artifacts use group `io.github.andymond` and version `0.1.0-SNAPSHOT`.
+Run `mvn -DskipITs install` from the repository root to install the modules locally without Docker. Gradle consumers can add `mavenLocal()`. All artifacts use group `io.github.andymond` and version `0.1.0-SNAPSHOT`.
 
 | Artifact | Include when |
 | --- | --- |
