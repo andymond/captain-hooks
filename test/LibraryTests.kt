@@ -2,7 +2,7 @@ import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import webhooks.*
 
-internal fun testLibrary() = withTempDirectory { directory ->
+internal fun testLibrary() {
     val secret = "library-test".toByteArray()
     val body = byteArrayOf(0, -1, 1)
     val archived = mutableMapOf<Pair<String, String>, ByteArray>()
@@ -50,7 +50,7 @@ internal fun testLibrary() = withTempDirectory { directory ->
             handled++
         }
     }
-    val endpoint = WebhookEndpoint(handler, secret, directory, archive, jobs)
+    val endpoint = WebhookEndpoint(handler, secret, archive = archive, jobs = jobs)
     val signature = sign(secret, "external-1", body)
     fun send(vararg ids: String) = runBlocking {
         endpoint.handleAsync("POST", ids.toList(), listOf(signature), body.inputStream())
