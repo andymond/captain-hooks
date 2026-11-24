@@ -1,86 +1,104 @@
 # Captain Hooks
 
-Use JDK 17 or newer and a Kotlin compiler that supports JVM target 17. The launcher uses `kotlinc` on `PATH`, an explicit `KOTLINC` executable, or the compiler bundled with IntelliJ IDEA at its default macOS location. It loads `kotlinx-coroutines-core-jvm` from the compiler distribution. If that distribution omits the JAR, set `WEBHOOK_COROUTINES_JAR` to its absolute path. The IntelliJ module declares version 1.8.0, which matches the bundled JAR used to test the launcher.
+A Kotlin/JVM library for receiving signed webhooks, deduplicating deliveries, and running handlers in the background. Use the CLI to scaffold a handler or embed it in Spring MVC, Spring Boot, or Ktor.
 
-On a fresh clone, run `chmod +x webhook` if the launcher needs executable permission.
+## Quick start
+
+With JDK 17+ and `kotlinc` available, run:
 
 ```sh
-./webhook test
-./webhook generate my-vendor
+bash webhook test
+bash webhook generate my_vendor
+WEBHOOK_SECRET=demo-secret bash webhook serve my_vendor
 ```
 
-The generator creates `src/webhooks/<namespace>/Handler.kt` and protects existing handlers from overwrites. Vendor names are normalized to lowercase, with hyphens mapped to underscores in Kotlin namespaces. The server binds to loopback and runs one vendor per process. The default port is `8080`.
+The generated handler lives at `src/webhooks/my_vendor/Handler.kt` and listens at `POST http://127.0.0.1:8080/webhooks/my_vendor`. Vendor names start with a letter and use letters, digits, and underscores. The CLI lowercases the name for both the package and URL. The generated handler runs synchronously, uses local files for deduplication, and needs no database. The launcher can also find IntelliJ IDEA’s bundled compiler on macOS. Use `KOTLINC` to point to another compiler and `WEBHOOK_COROUTINES_JAR` if that distribution omits the coroutine JAR.
 
 ## Processing modes
 
-| Mode | What the handler receives | Example |
+| Mode | How it runs | Example |
 | --- | --- | --- |
-| `SYNC` | The original body during the request | Default for generated handlers. Enable `persistWebhooks` to archive verified deliveries before handling. |
-| `ASYNC_ARCHIVE` | The original body loaded from the PostgreSQL archive | `incident-alerts` retains the full alert for attaching it to an incident record. This mode requires `persistWebhooks = true`. |
-| `ASYNC_PROJECTED` | The bytes returned by `ProjectedWebhookHandler.project` | `shipment-updates` queues a versioned record with only the order ID, tracking number, and status. The sample leaves archiving off. Enabling it also stores the original body. |
+| `SYNC` | Handles the verified body during the request. Enable `persistWebhooks` to archive it first. | Generated handlers |
+| `ASYNC_ARCHIVE` | Saves the original body and queues a reference. Requires `persistWebhooks = true` and a readable archive. | `incident_alerts` |
+| `ASYNC_PROJECTED` | Queues only the bytes returned by the handler’s `project` function. Raw archiving is optional. | `shipment_updates` |
 
-Both async modes verify the signature and commit one job per vendor and delivery ID before returning HTTP `204`. When archiving is enabled, a new job and its archive write commit together. An accepted duplicate returns `204`, malformed projected input returns `400`, and unavailable storage returns `503` with `Retry-After: 1`. Keep projection limited to local parsing and field selection.
+Async requests return `204` after the job is durably queued. Accepted duplicates also return `204`. Storage failures return `503` so the sender can retry. Workers retry with backoff and retain terminal failures. Use the delivery ID to make external side effects idempotent in case a worker retries after a crash or lease expiry.
 
-Each async server starts one coroutine worker for its vendor. Idle polling suspends, and blocking JDBC and handler calls use the shared I/O dispatcher. Shutdown cancels the worker. A claim interrupted during shutdown can be recovered after its lease expires. Jobs use a five-minute lease and retry handler exceptions with exponential backoff, up to five attempts. A handler can throw `PermanentWebhookFailure` to stop retries immediately. Failed jobs remain available for inspection. When a job completes, its row remains for deduplication and the queue releases its projected payload or archive reference. Keep the archive row while any job still references it. Allow existing jobs to finish before switching a vendor's processing mode, and keep workers compatible with queued projection versions. Switching a vendor from sync to async starts using database deduplication for newly accepted deliveries. Existing filesystem receipts are not imported.
+## Choose storage
 
-Workers may execute a job again after a crash or lease expiry. Use the delivery ID as the idempotency key for external side effects. Sync mode uses local receipts in `.webhook-data/` or `WEBHOOK_DATA_DIR`. An in-flight sync duplicate returns `503`, and a sync handler failure returns `500` so the sender can retry.
+Choose the archive and job queue independently. Applications supply and own their clients.
 
-## Run both examples
+| Backend | Archive | Job queue | Setup |
+| --- | --- | --- | --- |
+| JDBC | `JdbcWebhookArchive(dataSource, dialect)` | `JdbcWebhookJobs(dataSource, dialect)` | Supply a JDBC driver and `JdbcDialect` for PostgreSQL, MySQL, MariaDB, H2, or SQLite. Call `createSchema()` or apply equivalent migrations. |
+| Redis | `RedisWebhookArchive(redis)` | `RedisWebhookJobs(redis)` | Supply an application-managed Jedis client. Configure persistence and protect the keys from eviction. |
+| MongoDB | `MongoWebhookArchive(collection)` | `MongoWebhookJobs(collection)` | Use separate collections with acknowledged writes. Call `createIndexes()` on the queue during setup. |
 
-Start Postgres.app, then create the local database if needed and apply both migrations in order. With a database you already created, start at the first `psql` command.
+Archives keep the first body for each vendor and delivery ID. The endpoint saves the archive before enqueueing. If the enqueue fails, the sender can retry and reuse that record. Retain archived bodies while jobs still reference them.
+
+### Run an async demo
+
+The CLI uses JDBC for both storage roles. Set `WEBHOOK_DATABASE_URL` and `WEBHOOK_JDBC_JAR`, plus `WEBHOOK_DATABASE_USER` and `WEBHOOK_DATABASE_PASSWORD` if required. The CLI selects the dialect from the URL and initializes its tables. The [SQL scripts](db/) show the PostgreSQL schema for applications that manage it separately.
 
 ```sh
-createdb webhook_dev
-psql -d webhook_dev -v ON_ERROR_STOP=1 -f db/001_webhook_deliveries.sql
-psql -d webhook_dev -v ON_ERROR_STOP=1 -f db/002_webhook_jobs.sql
+WEBHOOK_SECRET=demo-secret bash webhook serve incident_alerts
 ```
 
-Download the [PostgreSQL JDBC driver](https://jdbc.postgresql.org/download/) and point the launcher at its JAR. Set `WEBHOOK_DATABASE_PASSWORD` if your PostgreSQL role requires a password.
+In another terminal, send a signed request. Run it twice with the same ID to see duplicate acknowledgment.
 
 ```sh
-export WEBHOOK_JDBC_JAR=/absolute/path/to/postgresql.jar
-export WEBHOOK_DATABASE_URL=jdbc:postgresql://127.0.0.1:5432/webhook_dev
-export WEBHOOK_DATABASE_USER="$(id -un)"
+id=alert-1
+body='Checkout is down'
+signature=$(printf '%s\n%s' "$id" "$body" |
+  openssl dgst -sha256 -hmac demo-secret | awk '{print $NF}')
+
+curl -i --data-binary "$body" \
+  -H "X-Webhook-Delivery: $id" \
+  -H "X-Webhook-Signature: sha256=$signature" \
+  http://127.0.0.1:8080/webhooks/incident_alerts
 ```
 
-Run each server in a terminal with those variables set.
+The signature covers the delivery ID, a newline byte, and the raw body. Use a stable ID containing 1–128 ASCII letters, digits, or characters from `._:-`.
 
-```sh
-WEBHOOK_SECRET=demo-secret ./webhook serve incident-alerts 8080
-WEBHOOK_SECRET=demo-secret ./webhook serve shipment-updates 8081
+## Embed in Spring or Ktor
+
+Run `mvn install` and depend on `io.github.andymond:captain-hooks:0.1.0-SNAPSHOT` from your local Maven repository. Gradle consumers can add `mavenLocal()`. Add Jedis or the MongoDB Java driver if you use those adapters.
+
+Create a `WebhookEndpoint(handler, secret, receiptsPath, archive, jobs)` with the storage your handler needs. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all values of each signature header and the original request stream.
+
+**Spring MVC or Spring Boot** registers the endpoint as a bean. Inside the controller, forward the request to the blocking API:
+
+```kotlin
+val result = endpoint.handle(
+    request.method,
+    request.getHeaders("X-Webhook-Delivery").toList(),
+    request.getHeaders("X-Webhook-Signature").toList(),
+    request.inputStream
+)
+return ResponseEntity.status(result.status).apply {
+    result.headers.forEach { (name, value) -> header(name, value) }
+}.build<Void>()
 ```
 
-In a third terminal, sign and send each example. Run this block again with the same IDs to see the duplicate acknowledgments.
+**Ktor 3** mounts `post(endpoint.route)` and uses the suspending API. Import `io.ktor.utils.io.jvm.javaio.toInputStream` to bridge the request channel:
 
-```sh
-send_hook() {
-  id=$1
-  body=$2
-  url=$3
-  signature=$(printf '%s\n%s' "$id" "$body" |
-    openssl dgst -sha256 -hmac demo-secret | awk '{print $NF}')
-  curl -sS -o /dev/null -w '%{http_code}\n' \
-    -H "X-Webhook-Delivery: $id" \
-    -H "X-Webhook-Signature: sha256=$signature" \
-    --data-binary "$body" "$url"
+```kotlin
+val result = call.receiveChannel().toInputStream().use { body ->
+    endpoint.handleAsync(
+        "POST",
+        call.request.headers.getAll("X-Webhook-Delivery").orEmpty(),
+        call.request.headers.getAll("X-Webhook-Signature").orEmpty(),
+        body
+    )
 }
-
-send_hook alert-1 'Checkout is down' http://127.0.0.1:8080/webhooks/incident-alerts
-send_hook shipment-1 'orderId=123&trackingNumber=ZX9&status=shipped&address=42+Private+Lane' \
-  http://127.0.0.1:8081/webhooks/shipment-updates
+result.headers.forEach { (name, value) -> call.response.headers.append(name, value) }
+call.respond(HttpStatusCode.fromValue(result.status))
 ```
 
-Both endpoints return `204`. The incident worker reports the size of the original alert. The shipment worker reports the order, tracking number, and status. Only the incident has a row in the raw archive.
+## Verification
 
-```sh
-psql -d webhook_dev -c 'SELECT vendor, delivery_id, state, attempts, last_error FROM webhook_jobs;'
-psql -d webhook_dev -c 'SELECT vendor, delivery_id, octet_length(body) AS bytes FROM webhook_deliveries;'
-```
+- `mvn clean verify` builds the full library. `bash webhook test` runs the project’s core and CLI tests.
+- For live JDBC tests, configure the driver and credentials, create the archive schema in a test database, and run `WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" bash webhook test`. Look for the archive and JDBC job storage PASS messages.
+- For live Redis or MongoDB checks, wire the adapters into a host and send a duplicate signed request. Expect two `204` responses, one completed job, and one archived body in archive mode.
 
-The generic signing format uses HMAC-SHA256 over the delivery ID, a newline byte, and the raw request body. Send the digest as `sha256=<hex>` in `X-Webhook-Signature`. Use a stable ID of 1–128 ASCII letters, digits, or characters from `._:-` in `X-Webhook-Delivery`.
-
-To also run the PostgreSQL integration tests, point at a test database with both migrations applied. The tests write and clean up their own rows and create a session-local temporary table to exercise rollback.
-
-```sh
-WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" ./webhook test
-```
+Core contracts live in [library/webhooks](library/webhooks). Storage implementations live in [adapters/archive](adapters/archive) and [adapters/jobs](adapters/jobs). The [CLI and demo handlers](src) are separate from the library.

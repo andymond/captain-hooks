@@ -24,26 +24,59 @@ interface ProjectedWebhookHandler : WebhookHandler {
 
 class PermanentWebhookFailure(message: String) : RuntimeException(message)
 
-internal data class ClaimedWebhook(val vendor: String, val delivery: Delivery, val attempt: Int, val token: UUID)
+enum class JobKind { PROJECTED, ARCHIVE }
 
-internal interface WebhookJobs {
-    fun enqueue(vendor: String, delivery: Delivery, projected: ByteArray?, archive: Boolean)
-    fun contains(vendor: String, id: String): Boolean
-    fun claim(vendor: String, projected: Boolean): ClaimedWebhook?
-    fun complete(job: ClaimedWebhook)
-    fun fail(job: ClaimedWebhook, terminal: Boolean, delaySeconds: Int, failure: String)
+sealed interface JobInput {
+    val kind: JobKind
+
+    data class Projected(val body: ByteArray) : JobInput {
+        override val kind = JobKind.PROJECTED
+    }
+
+    /** The worker loads the body by vendor and delivery ID from its configured archive. */
+    data object Archived : JobInput {
+        override val kind = JobKind.ARCHIVE
+    }
+}
+
+data class WebhookJob(val vendor: String, val deliveryId: String, val input: JobInput)
+
+data class ClaimedWebhook(val job: WebhookJob, val attempt: Int, val token: UUID)
+
+/** Stores job inputs and manages claims. Archive writes and reads belong to the endpoint and worker. */
+interface WebhookJobs {
+    /** Insert once by vendor and delivery ID. A successful return means the job was accepted. */
+    fun enqueue(job: WebhookJob)
+    fun contains(vendor: String, deliveryId: String): Boolean
+    fun claim(vendor: String, kind: JobKind): ClaimedWebhook?
+    fun complete(claim: ClaimedWebhook)
+    fun fail(claim: ClaimedWebhook, terminal: Boolean, delaySeconds: Int, failure: String)
 }
 
 internal const val MAX_WEBHOOK_ATTEMPTS = 5
 
-internal class WebhookWorker(private val handler: WebhookHandler, private val jobs: WebhookJobs) {
+class WebhookWorker(
+    private val handler: WebhookHandler,
+    private val jobs: WebhookJobs,
+    private val archive: ReadableWebhookArchive? = null
+) {
     suspend fun runOnce(): Boolean {
         val job = runInterruptible(Dispatchers.IO) {
-            jobs.claim(handler.vendor, handler.processingMode == ProcessingMode.ASYNC_PROJECTED)
+            val kind = if (handler.processingMode == ProcessingMode.ASYNC_PROJECTED) JobKind.PROJECTED else JobKind.ARCHIVE
+            jobs.claim(handler.vendor, kind)
         } ?: return false
 
         try {
-            runInterruptible(Dispatchers.IO) { handler.handle(job.delivery) }
+            runInterruptible(Dispatchers.IO) {
+                val (vendor, id, input) = job.job
+                val body = when (input) {
+                    is JobInput.Projected -> input.body
+                    JobInput.Archived -> checkNotNull(archive?.load(vendor, id)) {
+                        "Archived delivery is unavailable"
+                    }
+                }
+                handler.handle(Delivery(id, body))
+            }
         } catch (failure: CancellationException) {
             throw failure
         } catch (failure: Exception) {

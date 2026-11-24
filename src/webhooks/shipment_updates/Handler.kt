@@ -7,7 +7,7 @@ import webhooks.PermanentWebhookFailure
 import webhooks.ProjectedWebhookHandler
 
 class Handler : ProjectedWebhookHandler {
-    override val vendor = "shipment-updates"
+    override val vendor = "shipment_updates"
 
     override fun project(delivery: Delivery): ByteArray {
         val fields = shipmentFields(delivery.body.decodeToString())

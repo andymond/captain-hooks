@@ -1,15 +1,13 @@
 package webhooks
 
-import com.sun.net.httpserver.HttpServer
 import java.io.InputStream
-import java.net.InetSocketAddress
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.HexFormat
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 
 data class Delivery(val id: String, val body: ByteArray)
 
@@ -20,63 +18,12 @@ interface WebhookHandler {
     fun handle(delivery: Delivery)
 }
 
-internal val vendorName = Regex("[a-z][a-z0-9-]{0,62}")
+internal val vendorName = Regex("[a-z][a-z0-9_]{0,62}")
 private val deliveryId = Regex("[A-Za-z0-9._:-]{1,128}")
 private val signatureFormat = Regex("sha256=[A-Fa-f0-9]{64}")
 private const val MAX_BODY_BYTES = 1024 * 1024
 
-internal class RunningWebhookServer(
-    private val server: HttpServer,
-    private val executor: ExecutorService,
-    private val worker: AutoCloseable?
-) : AutoCloseable {
-    val port: Int get() = server.address.port
-
-    override fun close() {
-        server.stop(1)
-        executor.shutdownNow()
-        worker?.close()
-    }
-}
-
-internal fun startWebhookServer(
-    address: InetSocketAddress,
-    handler: WebhookHandler,
-    secret: ByteArray,
-    dataDirectory: Path,
-    archive: WebhookArchive? = null,
-    jobs: WebhookJobs? = null
-): RunningWebhookServer {
-    val endpoint = WebhookEndpoint(handler, secret, dataDirectory, archive, jobs)
-    val server = HttpServer.create(address, 0)
-    val executor = Executors.newFixedThreadPool(8)
-    server.executor = executor
-    server.createContext(endpoint.route) { exchange ->
-        exchange.use {
-            val status = try {
-                endpoint.receive(
-                    exchange.requestMethod,
-                    exchange.requestURI.rawPath,
-                    exchange.requestHeaders["X-Webhook-Delivery"]?.singleOrNull(),
-                    exchange.requestHeaders["X-Webhook-Signature"]?.singleOrNull(),
-                    exchange.requestBody
-                )
-            } catch (_: java.io.IOException) {
-                500
-            }
-            if (status == 405) exchange.responseHeaders.set("Allow", "POST")
-            if (status == 503) exchange.responseHeaders.set("Retry-After", "1")
-            exchange.sendResponseHeaders(status, -1)
-        }
-    }
-    server.start()
-    val worker = if (jobs != null && handler.processingMode != ProcessingMode.SYNC) {
-        WebhookWorker(handler, jobs).start()
-    } else null
-    return RunningWebhookServer(server, executor, worker)
-}
-
-internal class WebhookEndpoint(
+class WebhookEndpoint @JvmOverloads constructor(
     private val handler: WebhookHandler,
     secret: ByteArray,
     dataDirectory: Path,
@@ -85,17 +32,41 @@ internal class WebhookEndpoint(
 ) {
     private val mode = handler.processingMode
     private val queue = if (mode != ProcessingMode.SYNC) requireNotNull(jobs) else null
-    private val archive = if (mode == ProcessingMode.SYNC && handler.persistWebhooks) requireNotNull(archive) else null
+    private val archive = archive.takeIf { handler.persistWebhooks }
+    private val readableArchive = this.archive as? ReadableWebhookArchive
 
     init {
         require(vendorName.matches(handler.vendor))
         require(mode != ProcessingMode.ASYNC_ARCHIVE || handler.persistWebhooks)
         require(mode != ProcessingMode.ASYNC_PROJECTED || handler is ProjectedWebhookHandler)
+        require(!handler.persistWebhooks || this.archive != null) {
+            "persistWebhooks requires an archive."
+        }
+        require(mode != ProcessingMode.ASYNC_ARCHIVE || readableArchive != null) {
+            "Async archive mode requires a readable archive."
+        }
     }
 
     val route = "/webhooks/${handler.vendor}"
     private val key = SecretKeySpec(secret, "HmacSHA256")
     private val store = if (mode == ProcessingMode.SYNC) DeliveryStore(dataDirectory.resolve(handler.vendor)) else null
+
+    /** Start the worker when the host starts and close it when the host stops. */
+    fun startWorker(): AutoCloseable? = queue?.let { WebhookWorker(handler, it, readableArchive).start() }
+
+    /** Route-facing entry point. Supply all values for each header to reject duplicates. */
+    fun handle(method: String, deliveryIds: List<String>, signatures: List<String>, body: InputStream): WebhookResponse {
+        val status = try {
+            receive(method, route, deliveryIds.singleOrNull(), signatures.singleOrNull(), body)
+        } catch (_: java.io.IOException) {
+            500
+        }
+        return WebhookResponse(status)
+    }
+
+    suspend fun handleAsync(
+        method: String, deliveryIds: List<String>, signatures: List<String>, body: InputStream
+    ): WebhookResponse = runInterruptible(Dispatchers.IO) { handle(method, deliveryIds, signatures, body) }
 
     fun receive(method: String, path: String, id: String?, signature: String?, body: InputStream): Int {
         if (path != route) return 404
@@ -152,7 +123,11 @@ internal class WebhookEndpoint(
             }
         } else null
         return try {
-            queue.enqueue(handler.vendor, delivery, projection, handler.persistWebhooks)
+            if (archive == null || !queue.contains(handler.vendor, delivery.id)) {
+                archive?.save(handler.vendor, delivery)
+                val input = if (projection == null) JobInput.Archived else JobInput.Projected(projection)
+                queue.enqueue(WebhookJob(handler.vendor, delivery.id, input))
+            }
             204
         } catch (failure: Exception) {
             System.err.println("Webhook enqueue failed for ${handler.vendor} (${failure.javaClass.simpleName})")
@@ -163,3 +138,12 @@ internal class WebhookEndpoint(
 }
 
 private class WebhookArchiveUnavailable(cause: Exception) : RuntimeException(cause)
+
+data class WebhookResponse(val status: Int) {
+    val headers: Map<String, String>
+        get() = when (status) {
+            405 -> mapOf("Allow" to "POST")
+            503 -> mapOf("Retry-After" to "1")
+            else -> emptyMap()
+        }
+}
