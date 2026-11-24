@@ -1,5 +1,7 @@
 # Captain Hooks
 
+[![CI](https://github.com/andymond/captain-hooks/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/andymond/captain-hooks/actions/workflows/ci.yml)
+
 A Kotlin/JVM library for receiving signed webhooks, deduplicating deliveries, and running handlers in the background. Use the CLI to scaffold a handler or embed it in Spring MVC, Spring Boot, or Ktor.
 
 ## Quick start
@@ -22,7 +24,13 @@ The generated handler lives at `src/webhooks/my_vendor/Handler.kt` and listens a
 | `ASYNC_ARCHIVE` | Saves the original body and queues a reference. Requires `persistWebhooks = true` and a readable archive. | `incident_alerts` |
 | `ASYNC_PROJECTED` | Queues only the bytes returned by the handler’s `project` function. Raw archiving is optional. | `shipment_updates` |
 
-Async requests return `204` after the job is durably queued. Accepted duplicates also return `204`. Storage failures return `503` so the sender can retry. Workers retry with backoff and retain terminal failures. Use the delivery ID to make external side effects idempotent in case a worker retries after a crash or lease expiry.
+## Design notes
+
+Delivery is at least once. Async requests return `204` after durable enqueue, and a duplicate of an accepted job returns `204` without starting a new job. Storage failures return `503` so the sender can retry. Worker leases prevent simultaneous claims during the lease. A crash after an external side effect can still cause a retry, so use the delivery ID as an idempotency key.
+
+Sync mode suits short handlers when the sender should see handling failures directly. Archive mode keeps the original bytes for later handling and replay at the cost of storage and retention. Projected mode keeps the queue payload small and can avoid retaining sensitive fields. Its projection runs on the request path and must retain everything the worker will need.
+
+Archive and queue adapters can use different databases. The archive write comes first. If enqueue fails, the original stays available and a retry can safely reuse it.
 
 ## Choose storage
 
@@ -30,7 +38,7 @@ Choose the archive and job queue independently. Applications supply and own thei
 
 | Backend | Archive | Job queue | Setup |
 | --- | --- | --- | --- |
-| JDBC | `JdbcWebhookArchive(dataSource, dialect)` | `JdbcWebhookJobs(dataSource, dialect)` | Supply a JDBC driver and `JdbcDialect` for PostgreSQL, MySQL, MariaDB, H2, or SQLite. Call `createSchema()` or apply equivalent migrations. |
+| JDBC | `JdbcWebhookArchive(dataSource, dialect)` | `JdbcWebhookJobs(dataSource, dialect)` | PostgreSQL has live tests. MySQL, MariaDB, H2, and SQLite are experimental. Supply a JDBC driver and `JdbcDialect`, then call `createSchema()` or apply equivalent migrations. |
 | Redis | `RedisWebhookArchive(redis)` | `RedisWebhookJobs(redis)` | Supply an application-managed Jedis client. Configure persistence and protect the keys from eviction. |
 | MongoDB | `MongoWebhookArchive(collection)` | `MongoWebhookJobs(collection)` | Use separate collections with acknowledged writes. Call `createIndexes()` on the queue during setup. |
 
@@ -106,8 +114,9 @@ call.respond(HttpStatusCode.fromValue(result.status))
 
 ## Verification
 
-- `mvn clean verify` builds the core and all backend modules. `bash webhook test` runs the project’s core and CLI tests.
-- For live JDBC tests, configure the driver and credentials, create the archive schema in a test database, and run `WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" bash webhook test`. Look for the archive and JDBC job storage PASS messages.
-- For live Redis or MongoDB checks, wire the adapters into a host and send a duplicate signed request. Expect two `204` responses, one completed job, and one archived body in archive mode.
-
+- Run `mvn clean verify` with Docker running. Testcontainers starts PostgreSQL, Redis, and MongoDB and the tests set up their own schemas. The Actions workflow supplies PostgreSQL as a service and uses Testcontainers for Redis and MongoDB.
+- Run `bash webhook test` for fast core and CLI checks without Docker.
+- Run `mvn package` to build artifacts without starting the integration-test containers.
 Core contracts live in [library/webhooks](library/webhooks). Storage implementations live in [adapters/archive](adapters/archive) and [adapters/jobs](adapters/jobs). The [CLI and demo handlers](src) are separate from the library.
+
+Licensed under the [MIT License](LICENSE).

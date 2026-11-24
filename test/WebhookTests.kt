@@ -49,9 +49,7 @@ fun main() {
     testInjectedReceipts()
     testPortableQueue()
     testWebhookPersistence()
-    testPostgresArchive()
     testJdbcConnectionSelection()
-    testJdbcJobs()
 }
 
 private fun testEndpoint() = withTempDirectory { directory ->

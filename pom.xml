@@ -8,12 +8,19 @@
     <version>0.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>Captain Hooks build</name>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/license/mit</url>
+        </license>
+    </licenses>
     <modules>
         <module>modules/core</module>
         <module>modules/adapter-support</module>
         <module>modules/jdbc</module>
         <module>modules/redis</module>
         <module>modules/mongo</module>
+        <module>modules/integration-tests</module>
     </modules>
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
