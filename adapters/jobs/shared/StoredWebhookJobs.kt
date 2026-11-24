@@ -9,7 +9,8 @@ import webhooks.MAX_WEBHOOK_ATTEMPTS
 import webhooks.WebhookJob
 import webhooks.WebhookJobs
 
-internal data class JobRecord(
+/** Persistent state shared by the bundled queue adapters. */
+data class JobRecord(
     val vendor: String,
     val id: String,
     val input: JobKind,
@@ -21,14 +22,18 @@ internal data class JobRecord(
     val failure: String? = null
 )
 
-internal interface JobRecords {
+/** Persistence operations for queue adapters with atomic insert and compare-and-set. */
+interface JobRecords {
+    /** Insert only if no record exists for the vendor and delivery ID. */
     fun insert(record: JobRecord)
     fun get(vendor: String, id: String): JobRecord?
     fun due(vendor: String, input: JobKind, now: Long): List<JobRecord>
+    /** Update only if the stored revision still matches [previous]. */
     fun replace(previous: JobRecord, next: JobRecord): Boolean
 }
 
-internal class StoredWebhookJobs(
+/** Implements claim and retry behavior on top of an adapter-specific record store. */
+class StoredWebhookJobs(
     private val records: JobRecords,
     private val clock: Clock = Clock.systemUTC()
 ) : WebhookJobs {

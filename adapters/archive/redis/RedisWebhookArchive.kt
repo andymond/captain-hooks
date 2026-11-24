@@ -4,7 +4,7 @@ import redis.clients.jedis.UnifiedJedis
 import redis.clients.jedis.params.SetParams
 import webhooks.Delivery
 import webhooks.ReadableWebhookArchive
-import webhooks.archiveKey
+import webhooks.adapters.archiveKey
 
 /** Uses the application's configured Redis client. Configure durable, non-evicting storage for archives. */
 class RedisWebhookArchive(

@@ -11,7 +11,7 @@ import org.bson.Document
 import org.bson.types.Binary
 import webhooks.JobKind
 import webhooks.WebhookJobs
-import webhooks.archiveKey
+import webhooks.adapters.archiveKey
 
 /** Durable queue backed by an application-managed MongoDB collection. */
 class MongoWebhookJobs private constructor(private val records: MongoJobRecords) :

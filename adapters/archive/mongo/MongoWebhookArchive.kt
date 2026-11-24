@@ -12,7 +12,7 @@ import org.bson.types.Binary
 import java.util.Date
 import webhooks.Delivery
 import webhooks.ReadableWebhookArchive
-import webhooks.archiveKey
+import webhooks.adapters.archiveKey
 
 /** Uses the application's collection and its configured write concern. */
 class MongoWebhookArchive(private val collection: MongoCollection<Document>) : ReadableWebhookArchive {
