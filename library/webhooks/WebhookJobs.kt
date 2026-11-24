@@ -37,6 +37,7 @@ interface WebhookJobs {
     }
 
     val supportsExternalArchive: Boolean get() = false
+    val supportsEmbeddedArchive: Boolean get() = true
 
     fun contains(vendor: String, id: String): Boolean
     fun claim(vendor: String, projected: Boolean): ClaimedWebhook?

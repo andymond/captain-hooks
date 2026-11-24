@@ -40,6 +40,9 @@ class WebhookEndpoint @JvmOverloads constructor(
         require(mode != ProcessingMode.ASYNC_ARCHIVE || handler.persistWebhooks)
         require(mode != ProcessingMode.ASYNC_PROJECTED || handler is ProjectedWebhookHandler)
         require(mode != ProcessingMode.SYNC || !handler.persistWebhooks || this.archive != null)
+        require(queue == null || !handler.persistWebhooks || this.archive != null || queue.supportsEmbeddedArchive) {
+            "This job queue requires an independently configured archive."
+        }
         if (mode == ProcessingMode.ASYNC_ARCHIVE && this.archive != null) {
             require(readableArchive != null) { "Async archive mode requires a readable archive." }
             require(queue?.supportsExternalArchive == true) { "The job queue must support external archive references." }

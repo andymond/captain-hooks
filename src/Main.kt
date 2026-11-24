@@ -9,8 +9,9 @@ import java.sql.SQLException
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import kotlin.system.exitProcess
-import webhooks.PostgresWebhookArchive
-import webhooks.PostgresWebhookJobs
+import webhooks.ArchiveSqlDialect
+import webhooks.JdbcWebhookArchive
+import webhooks.LegacyPostgresJobs
 import webhooks.ProcessingMode
 import webhooks.WebhookHandler
 import webhooks.postgresConnectionFactory
@@ -104,8 +105,8 @@ private fun serve(vendor: String, portArgument: String, root: Path, output: (Str
         output("ASYNC_ARCHIVE requires persistWebhooks = true.")
         return 2
     }
-    var archive: PostgresWebhookArchive? = null
-    var jobs: PostgresWebhookJobs? = null
+    var archive: JdbcWebhookArchive? = null
+    var jobs: LegacyPostgresJobs? = null
     if (async || handler.persistWebhooks) {
         val url = System.getenv("WEBHOOK_DATABASE_URL")
         if (url == null || !url.startsWith("jdbc:postgresql:")) {
@@ -123,9 +124,9 @@ private fun serve(vendor: String, portArgument: String, root: Path, output: (Str
         )
         try {
             if (async) {
-                jobs = PostgresWebhookJobs(connect).also { it.verifySchema() }
+                jobs = LegacyPostgresJobs(connect).also { it.verifySchema() }
             } else {
-                archive = PostgresWebhookArchive(connect).also { it.verifySchema() }
+                archive = JdbcWebhookArchive(ArchiveSqlDialect.POSTGRESQL, connect).also { it.verifySchema() }
             }
         } catch (failure: SQLException) {
             output("Cannot access webhook storage (SQLSTATE ${failure.sqlState}). Check the connection and apply the database migrations in db/.")

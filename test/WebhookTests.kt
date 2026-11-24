@@ -43,6 +43,7 @@ fun main() {
     testEndpoint()
     testAsyncWebhooks()
     testLibrary()
+    testPortableQueue()
     testWebhookPersistence()
     testPostgresArchive()
     testPostgresJobs()

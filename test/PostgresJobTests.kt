@@ -4,7 +4,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import webhooks.Delivery
 import webhooks.MAX_WEBHOOK_ATTEMPTS
-import webhooks.PostgresWebhookJobs
+import webhooks.LegacyPostgresJobs
 import webhooks.postgresConnectionFactory
 
 internal fun testPostgresJobs() {
@@ -12,7 +12,7 @@ internal fun testPostgresJobs() {
     val connect = postgresConnectionFactory(
         url, System.getenv("WEBHOOK_DATABASE_USER"), System.getenv("WEBHOOK_DATABASE_PASSWORD")
     )
-    val jobs = PostgresWebhookJobs(connect)
+    val jobs = LegacyPostgresJobs(connect)
     jobs.verifySchema()
     val vendor = "job-test-${UUID.randomUUID()}"
     val raw = Delivery("alert-1", byteArrayOf(0, -1, 10))
@@ -44,7 +44,7 @@ internal fun testPostgresJobs() {
 
     try {
         // Shadow the archive table on one connection so its insert fails after the job insert.
-        val failingArchive = PostgresWebhookJobs {
+        val failingArchive = LegacyPostgresJobs {
             connect().also { connection ->
                 connection.createStatement().use {
                     it.execute(

@@ -19,7 +19,7 @@ The generator creates `src/webhooks/<namespace>/Handler.kt` and protects existin
 | `ASYNC_ARCHIVE` | The original body loaded from the PostgreSQL archive | `incident-alerts` retains the full alert for attaching it to an incident record. This mode requires `persistWebhooks = true`. |
 | `ASYNC_PROJECTED` | The bytes returned by `ProjectedWebhookHandler.project` | `shipment-updates` queues a versioned record with only the order ID, tracking number, and status. The sample leaves archiving off. Enabling it also stores the original body. |
 
-Both async modes verify the signature and commit one job per vendor and delivery ID before returning HTTP `204`. When archiving is enabled, a new job and its archive write commit together. An accepted duplicate returns `204`, malformed projected input returns `400`, and unavailable storage returns `503` with `Retry-After: 1`. Keep projection limited to local parsing and field selection.
+Both async demo modes verify the signature and commit one job per vendor and delivery ID before returning HTTP `204`. The CLI demo commits new jobs and archive writes in one PostgreSQL transaction. An accepted duplicate returns `204`, malformed projected input returns `400`, and unavailable storage returns `503` with `Retry-After: 1`. Keep projection limited to local parsing and field selection.
 
 Each async server starts one coroutine worker for its vendor. Idle polling suspends, and blocking JDBC and handler calls use the shared I/O dispatcher. Shutdown cancels the worker. A claim interrupted during shutdown can be recovered after its lease expires. Jobs use a five-minute lease and retry handler exceptions with exponential backoff, up to five attempts. A handler can throw `PermanentWebhookFailure` to stop retries immediately. Failed jobs remain available for inspection. When a job completes, its row remains for deduplication and the queue releases its projected payload or archive reference. Keep the archive row while any job still references it. Allow existing jobs to finish before switching a vendor's processing mode, and keep workers compatible with queued projection versions. Switching a vendor from sync to async starts using database deduplication for newly accepted deliveries. Existing filesystem receipts are not imported.
 
@@ -102,7 +102,20 @@ Construct a `webhooks.WebhookEndpoint` with your handler, signature secret, and 
 
 `JdbcWebhookArchive`, `RedisWebhookArchive`, and `MongoWebhookArchive` save the first payload for each vendor and delivery ID. Redis and Mongo adapters live in the `webhooks.archive` package. The host owns each database client and its credentials, pooling, durability, and shutdown configuration.
 
-`PostgresWebhookJobs` is the included durable async queue. Apply the migrations in `db/` to its PostgreSQL database, including `003_external_archive.sql` for external references. Custom queues implement `WebhookJobs`. To support `ASYNC_ARCHIVE` with an external store, expose `supportsExternalArchive` and implement `enqueueArchiveReference`. Worker claims for those references must set `externalArchive = true`. With a separate archive, saving the payload and enqueueing are two writes. If saving succeeds and enqueueing fails, the original record stays in the archive and the endpoint returns `503`. A sender retry safely reuses that record. Keep external archive records for at least as long as their jobs can be retried. To use the included queue's single PostgreSQL transaction, leave the endpoint's archive argument unset for an async handler with `persistWebhooks` enabled.
+### Choose a job queue independently
+
+| Queue | Construction | Setup |
+| --- | --- | --- |
+| SQL | `JdbcWebhookJobs(dataSource, ArchiveSqlDialect.H2)` | Use any of the archive SQL dialects. Call `createSchema()` during setup. For high-volume polling, index `captain_webhook_jobs(vendor, input_kind, due_at)` in your migrations. |
+| Redis | `RedisWebhookJobs(redis)` | Supply an application-managed Jedis client. Use persistent, non-evicting Redis. |
+| MongoDB | `MongoWebhookJobs(database.getCollection("webhook_jobs"))` | Supply an acknowledged collection and call `createIndexes()` during setup. |
+
+The Redis and Mongo queue adapters live in `webhooks.jobs`. Configure a `WebhookArchive` independently when an async handler has `persistWebhooks = true`. You can use a JDBC queue with a MongoDB archive, a Redis queue with a JDBC archive, or another combination. Projected handlers with archiving disabled need only a queue.
+
+With an independent archive, saving the payload and enqueueing are two writes. If the save succeeds and enqueueing fails, the archive retains the original and the endpoint returns `503`. A sender retry safely reuses that record. Keep archived bodies until all jobs that reference them can finish retrying. Queue workers use the host clocks for lease times, so synchronize clocks across worker instances.
+
+The existing CLI demos retain their PostgreSQL transaction and migration files for compatibility. The library's JDBC queue uses its own `captain_webhook_jobs` table. Drain existing demo jobs before switching stores. Custom queues can implement `WebhookJobs` directly.
+
 
 ### Spring MVC or Spring Boot
 

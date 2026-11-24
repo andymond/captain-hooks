@@ -14,16 +14,28 @@ enum class ArchiveSqlDialect(internal val bodyType: String, internal val timeTyp
 }
 
 class JdbcWebhookArchive(
-    private val dataSource: DataSource,
-    private val dialect: ArchiveSqlDialect
+    private val dialect: ArchiveSqlDialect,
+    private val connect: () -> Connection
 ) : ReadableWebhookArchive {
+    constructor(dataSource: DataSource, dialect: ArchiveSqlDialect) : this(dialect, { dataSource.connection })
+
+    fun verifySchema() {
+        connect().use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery(
+                    "SELECT vendor, delivery_id, body, received_at FROM webhook_deliveries WHERE 1 = 0"
+                ).close()
+            }
+        }
+    }
+
     /** Run at setup time or use the same schema in your application's migration. */
     fun createSchema() {
         val keyCollation = when (dialect) {
             ArchiveSqlDialect.MYSQL, ArchiveSqlDialect.MARIADB -> " CHARACTER SET ascii COLLATE ascii_bin"
             else -> ""
         }
-        dataSource.connection.use { connection ->
+        connect().use { connection ->
             connection.createStatement().use { statement ->
                 statement.executeUpdate(
                     """
@@ -43,7 +55,7 @@ class JdbcWebhookArchive(
 
     override fun save(vendor: String, delivery: Delivery) {
         try {
-            dataSource.connection.use { connection ->
+            connect().use { connection ->
                 connection.prepareStatement(
                     "INSERT INTO webhook_deliveries (vendor, delivery_id, body) VALUES (?, ?, ?)"
                 ).use { statement ->
@@ -55,17 +67,12 @@ class JdbcWebhookArchive(
                 if (!connection.autoCommit) connection.commit()
             }
         } catch (failure: SQLException) {
-            val duplicate = when (dialect) {
-                ArchiveSqlDialect.POSTGRESQL, ArchiveSqlDialect.H2 -> failure.sqlState == "23505"
-                ArchiveSqlDialect.MYSQL, ArchiveSqlDialect.MARIADB -> failure.errorCode == 1062
-                ArchiveSqlDialect.SQLITE -> failure.errorCode in setOf(19, 1555, 2067)
-            }
-            if (!duplicate || load(vendor, delivery.id) == null) throw failure
+            if (!dialect.isDuplicate(failure) || load(vendor, delivery.id) == null) throw failure
         }
     }
 
     override fun load(vendor: String, deliveryId: String): ByteArray? =
-        dataSource.connection.use { connection -> readArchive(connection, vendor, deliveryId) }
+        connect().use { connection -> readArchive(connection, vendor, deliveryId) }
 }
 
 internal fun readArchive(connection: Connection, vendor: String, deliveryId: String): ByteArray? =
@@ -76,3 +83,10 @@ internal fun readArchive(connection: Connection, vendor: String, deliveryId: Str
         statement.setString(2, deliveryId)
         statement.executeQuery().use { if (it.next()) it.getBytes(1) else null }
     }
+
+
+internal fun ArchiveSqlDialect.isDuplicate(failure: SQLException): Boolean = when (this) {
+    ArchiveSqlDialect.POSTGRESQL, ArchiveSqlDialect.H2 -> failure.sqlState == "23505"
+    ArchiveSqlDialect.MYSQL, ArchiveSqlDialect.MARIADB -> failure.errorCode == 1062
+    ArchiveSqlDialect.SQLITE -> failure.errorCode in setOf(19, 1555, 2067)
+}
