@@ -105,7 +105,8 @@ private class JdbcJobRecords(
         setBytes(2, record.body)
         setString(3, record.revision)
         setInt(4, record.attempt)
-        if (record.due == null) setNull(5, Types.BIGINT) else setLong(5, record.due)
+        val due = record.due
+        if (due == null) setNull(5, Types.BIGINT) else setLong(5, due)
         setBoolean(6, record.lease)
         setString(7, record.failure)
         setString(8, record.vendor)
