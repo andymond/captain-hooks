@@ -1,15 +1,15 @@
 import java.util.UUID
 import webhooks.Delivery
-import webhooks.jdbc.JdbcDialect
+import webhooks.jdbc.JdbcConnections
 import webhooks.archive.JdbcWebhookArchive
-import webhooks.postgresConnectionFactory
 
 internal fun testPostgresArchive() {
     val url = System.getenv("WEBHOOK_TEST_DATABASE_URL") ?: return
-    val connect = postgresConnectionFactory(
+    val connections = requireNotNull(JdbcConnections.fromUrl(
         url, System.getenv("WEBHOOK_DATABASE_USER"), System.getenv("WEBHOOK_DATABASE_PASSWORD")
-    )
-    val archive = JdbcWebhookArchive(JdbcDialect.POSTGRESQL, connect)
+    ))
+    val connect = connections::open
+    val archive = JdbcWebhookArchive(connections.dialect, connect)
     archive.verifySchema()
     val vendor = "archive-test"
     val otherVendor = "archive-test-other"

@@ -46,6 +46,7 @@ fun main() {
     testPortableQueue()
     testWebhookPersistence()
     testPostgresArchive()
+    testJdbcConnectionSelection()
     testJdbcJobs()
 }
 

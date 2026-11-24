@@ -1,15 +1,16 @@
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import webhooks.*
-import webhooks.jdbc.JdbcDialect
+import webhooks.jdbc.JdbcConnections
 import webhooks.jobs.JdbcWebhookJobs
 
 internal fun testJdbcJobs() {
     val url = System.getenv("WEBHOOK_TEST_DATABASE_URL") ?: return
-    val connect = postgresConnectionFactory(
+    val connections = requireNotNull(JdbcConnections.fromUrl(
         url, System.getenv("WEBHOOK_DATABASE_USER"), System.getenv("WEBHOOK_DATABASE_PASSWORD")
-    )
-    val queue = JdbcWebhookJobs(JdbcDialect.POSTGRESQL, connect)
+    ))
+    val connect = connections::open
+    val queue = JdbcWebhookJobs(connections.dialect, connect)
     queue.createSchema()
     val vendor = "job-test-${UUID.randomUUID()}"
     val body = byteArrayOf(0, -1, 10)

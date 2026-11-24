@@ -9,12 +9,11 @@ import java.sql.SQLException
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import kotlin.system.exitProcess
-import webhooks.jdbc.JdbcDialect
+import webhooks.jdbc.JdbcConnections
 import webhooks.archive.JdbcWebhookArchive
 import webhooks.jobs.JdbcWebhookJobs
 import webhooks.ProcessingMode
 import webhooks.WebhookHandler
-import webhooks.postgresConnectionFactory
 import webhooks.startWebhookServer
 import webhooks.vendorName
 
@@ -108,27 +107,22 @@ private fun serve(vendor: String, portArgument: String, root: Path, output: (Str
     var archive: JdbcWebhookArchive? = null
     var jobs: JdbcWebhookJobs? = null
     if (async || handler.persistWebhooks) {
-        val url = System.getenv("WEBHOOK_DATABASE_URL")
-        if (url == null || !url.startsWith("jdbc:postgresql:")) {
-            output("Set WEBHOOK_DATABASE_URL to a PostgreSQL JDBC URL for archiving or async processing.")
-            return 2
-        }
-        try {
-            Class.forName("org.postgresql.Driver")
-        } catch (_: ClassNotFoundException) {
-            output("Set WEBHOOK_JDBC_JAR to the PostgreSQL JDBC driver JAR.")
-            return 2
-        }
-        val connect = postgresConnectionFactory(
-            url, System.getenv("WEBHOOK_DATABASE_USER"), System.getenv("WEBHOOK_DATABASE_PASSWORD")
+        val connections = JdbcConnections.fromUrl(
+            System.getenv("WEBHOOK_DATABASE_URL"),
+            System.getenv("WEBHOOK_DATABASE_USER"),
+            System.getenv("WEBHOOK_DATABASE_PASSWORD")
         )
+        if (connections == null) {
+            output("Set WEBHOOK_DATABASE_URL to a supported JDBC URL for archiving or async processing.")
+            return 2
+        }
         try {
-            if (async) jobs = JdbcWebhookJobs(JdbcDialect.POSTGRESQL, connect).also { it.createSchema() }
+            if (async) jobs = JdbcWebhookJobs(connections.dialect, connections::open).also { it.createSchema() }
             if (handler.persistWebhooks) {
-                archive = JdbcWebhookArchive(JdbcDialect.POSTGRESQL, connect).also { it.createSchema() }
+                archive = JdbcWebhookArchive(connections.dialect, connections::open).also { it.createSchema() }
             }
         } catch (failure: SQLException) {
-            output("Cannot access webhook storage (SQLSTATE ${failure.sqlState}). Check the connection and the storage schema.")
+            output("Cannot access webhook storage (SQLSTATE ${failure.sqlState}). Check the JDBC driver in WEBHOOK_JDBC_JAR, the connection, and the storage schema.")
             return 1
         }
     }

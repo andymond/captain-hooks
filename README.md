@@ -113,7 +113,7 @@ All queue adapters live in `webhooks.jobs`. Configure a `WebhookArchive` indepen
 
 With an independent archive, saving the payload and enqueueing are two writes. If the save succeeds and enqueueing fails, the archive retains the original and the endpoint returns `503`. A sender retry safely reuses that record. Keep archived bodies until all jobs that reference them can finish retrying. Queue workers use the host clocks for lease times, so synchronize clocks across worker instances.
 
-The CLI demos use `JdbcWebhookJobs` and `JdbcWebhookArchive` with the PostgreSQL dialect.
+The CLI demos use `JdbcWebhookJobs` and `JdbcWebhookArchive`. The JDBC adapter selects the dialect from `WEBHOOK_DATABASE_URL` and loads the matching driver through JDBC. Point `WEBHOOK_JDBC_JAR` at the driver for that database. The commands above use PostgreSQL.
 
 ### Code layout
 
