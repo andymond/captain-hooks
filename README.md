@@ -60,22 +60,41 @@ curl -i --data-binary "$body" \
 
 The demo signature covers the delivery ID, a newline byte, and the raw body. Use a stable ID containing 1–128 ASCII letters, digits, or characters from `._:-`.
 
-## Verify a Stripe webhook
+## Use a provider's signature scheme
 
-Pass a `WebhookSignatureVerifier` when a provider uses its own signing format. The bundled Stripe verifier checks `Stripe-Signature` v1 over the timestamp, a dot, and the original request bytes. It allows a five-minute clock window by default. Use the signing secret for that Stripe endpoint and read the top-level event ID from the authenticated body for deduplication.
+Implement `WebhookSignatureVerifier` with your provider's SDK. The verifier receives the original request bytes and all header values, and returns an authenticated delivery ID for deduplication. Captain Hooks' demo verifier compares fixed-size HMAC digests with [`MessageDigest.isEqual`](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/security/MessageDigest.html#isEqual(byte%5B%5D,byte%5B%5D)).
+
+For example, an application using the [Stripe Java SDK](https://docs.stripe.com/webhooks/signature) can verify the header and read the event ID with its existing JSON parser:
 
 ```kotlin
-import webhooks.WebhookEndpoint
-import webhooks.signatures.StripeSignatureVerifier
+import com.stripe.exception.SignatureVerificationException
+import com.stripe.net.Webhook
+import java.io.IOException
+import webhooks.SignatureVerification
+import webhooks.WebhookSignatureVerifier
 
-// objectMapper is the application's existing Jackson ObjectMapper.
-val verifier = StripeSignatureVerifier(stripeEndpointSecret) { rawBody ->
-    objectMapper.readTree(rawBody)?.path("id")?.textValue()
+val verifier = WebhookSignatureVerifier { headers, rawBody ->
+    val signature = headers.filterKeys { it.equals("Stripe-Signature", ignoreCase = true) }
+        .values.flatten().singleOrNull()
+        ?: return@WebhookSignatureVerifier SignatureVerification.InvalidSignature
+
+    try {
+        val payload = rawBody.decodeToString(throwOnInvalidSequence = true)
+        if (!Webhook.Signature.verifyHeader(payload, signature, stripeEndpointSecret, 300L)) {
+            return@WebhookSignatureVerifier SignatureVerification.InvalidSignature
+        }
+        val id = objectMapper.readTree(rawBody)?.path("id")?.textValue()
+        if (id.isNullOrBlank()) SignatureVerification.InvalidDelivery
+        else SignatureVerification.Verified(id)
+    } catch (_: SignatureVerificationException) {
+        SignatureVerification.InvalidSignature
+    } catch (_: IOException) {
+        SignatureVerification.InvalidDelivery
+    }
 }
-val endpoint = WebhookEndpoint(stripeHandler, verifier, receipts = receipts)
 ```
 
-The built-in verifiers compare computed and supplied 32-byte HMAC digests with `MessageDigest.isEqual`. Header parsing and timestamp validation take their own paths. See the [Stripe signing guide](https://docs.stripe.com/webhooks/signature) and [JDK digest comparison](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/security/MessageDigest.html#isEqual(byte%5B%5D,byte%5B%5D)).
+Pass it as `WebhookEndpoint(handler, verifier, receipts = receipts)` for a synchronous handler. The application supplies `stripeEndpointSecret`, its JSON mapper, and the Stripe SDK dependency.
 
 ## Embed in Spring or Ktor
 
