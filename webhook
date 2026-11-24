@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+compiler="${KOTLINC:-kotlinc}"
+idea_compiler='/Applications/IntelliJ IDEA.app/Contents/plugins/Kotlin/kotlinc/bin/kotlinc'
+if ! command -v "$compiler" >/dev/null && [[ -z "${KOTLINC:-}" && -x "$idea_compiler" ]]; then
+    compiler="$idea_compiler"
+fi
+
+coroutines_jar="${WEBHOOK_COROUTINES_JAR:-}"
+if [[ -z "$coroutines_jar" ]]; then
+    compiler_path="$(command -v "$compiler")"
+    while [[ -L "$compiler_path" ]]; do
+        target="$(readlink "$compiler_path")"
+        if [[ "$target" == /* ]]; then
+            compiler_path="$target"
+        else
+            compiler_path="$(dirname "$compiler_path")/$target"
+        fi
+    done
+    coroutines_jar="$(dirname "$compiler_path")/../lib/kotlinx-coroutines-core-jvm.jar"
+fi
+if [[ ! -f "$coroutines_jar" ]]; then
+    printf 'Set WEBHOOK_COROUTINES_JAR to the kotlinx-coroutines-core-jvm JAR.\n' >&2
+    exit 2
+fi
+
+build_dir="$(mktemp -d "${TMPDIR:-/tmp}/webhook.XXXXXXXX")"
+trap 'rm -rf "$build_dir"' EXIT
+classpath="$build_dir/webhook.jar:$coroutines_jar"
+if [[ -n "${WEBHOOK_JDBC_JAR:-}" ]]; then
+    if [[ ! -f "$WEBHOOK_JDBC_JAR" ]]; then
+        printf 'JDBC driver JAR does not exist: %s\n' "$WEBHOOK_JDBC_JAR" >&2
+        exit 2
+    fi
+    classpath="$classpath:$WEBHOOK_JDBC_JAR"
+fi
+if [[ "${1:-}" == test ]]; then
+    "$compiler" src test -classpath "$coroutines_jar" -jvm-target 17 -include-runtime -d "$build_dir/webhook.jar"
+    java -cp "$classpath" WebhookTestsKt
+else
+    "$compiler" src -classpath "$coroutines_jar" -jvm-target 17 -include-runtime -d "$build_dir/webhook.jar"
+    java -cp "$classpath" MainKt "$@"
+fi
