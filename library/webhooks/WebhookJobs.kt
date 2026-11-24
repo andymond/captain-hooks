@@ -53,7 +53,8 @@ interface WebhookJobs {
     fun fail(claim: ClaimedWebhook, terminal: Boolean, delaySeconds: Int, failure: String)
 }
 
-internal const val MAX_WEBHOOK_ATTEMPTS = 5
+/** Maximum number of claims before a delivery is considered exhausted. */
+const val MAX_WEBHOOK_ATTEMPTS = 5
 
 class WebhookWorker(
     private val handler: WebhookHandler,

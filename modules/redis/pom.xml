@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.github.andymond</groupId>
+        <artifactId>captain-hooks-build</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+    <artifactId>captain-hooks-redis</artifactId>
+    <name>Captain Hooks REDIS adapter</name>
+    <dependencies>
+        <dependency>
+            <groupId>io.github.andymond</groupId>
+            <artifactId>captain-hooks-adapter-support</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>5.2.0</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <configuration>
+                    <sourceDirs>
+                        <sourceDir>${project.basedir}/../../adapters/archive/redis</sourceDir>
+                        <sourceDir>${project.basedir}/../../adapters/jobs/redis</sourceDir>
+                    </sourceDirs>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

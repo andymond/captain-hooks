@@ -39,7 +39,7 @@ fi
 jdbc_sources=(adapters/jdbc adapters/archive/jdbc adapters/jobs/jdbc adapters/jobs/shared)
 if [[ "${1:-}" == build-core ]]; then
     mkdir -p target
-    "$compiler" library "${jdbc_sources[@]}" -classpath "$coroutines_jar" -jvm-target 17 -d target/captain-hooks-core.jar
+    "$compiler" library -classpath "$coroutines_jar" -jvm-target 17 -d target/captain-hooks-core.jar
 elif [[ "${1:-}" == test ]]; then
     "$compiler" library "${jdbc_sources[@]}" src test -classpath "$coroutines_jar" -jvm-target 17 -include-runtime -d "$build_dir/webhook.jar"
     java -cp "$classpath" WebhookTestsKt

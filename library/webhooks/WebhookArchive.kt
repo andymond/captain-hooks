@@ -9,5 +9,3 @@ fun interface WebhookArchive {
 interface ReadableWebhookArchive : WebhookArchive {
     fun load(vendor: String, deliveryId: String): ByteArray?
 }
-
-internal fun archiveKey(vendor: String, id: String) = "${vendor.length}:$vendor:$id"

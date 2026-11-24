@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.github.andymond</groupId>
+        <artifactId>captain-hooks-build</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+    <artifactId>captain-hooks-jdbc</artifactId>
+    <name>Captain Hooks JDBC adapter</name>
+    <dependencies>
+        <dependency>
+            <groupId>io.github.andymond</groupId>
+            <artifactId>captain-hooks-adapter-support</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <resources>
+            <resource>
+                <directory>${project.basedir}/../../db</directory>
+                <targetPath>META-INF/captain-hooks/db</targetPath>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <configuration>
+                    <sourceDirs>
+                        <sourceDir>${project.basedir}/../../adapters/archive/jdbc</sourceDir>
+                        <sourceDir>${project.basedir}/../../adapters/jobs/jdbc</sourceDir>
+                        <sourceDir>${project.basedir}/../../adapters/jdbc</sourceDir>
+                    </sourceDirs>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

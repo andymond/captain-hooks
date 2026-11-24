@@ -62,7 +62,16 @@ The signature covers the delivery ID, a newline byte, and the raw body. Use a st
 
 ## Embed in Spring or Ktor
 
-Run `mvn install` and depend on `io.github.andymond:captain-hooks:0.1.0-SNAPSHOT` from your local Maven repository. Gradle consumers can add `mavenLocal()`. Add Jedis or the MongoDB Java driver if you use those adapters.
+Run `mvn install` from the repository root to install the modules locally. Gradle consumers can add `mavenLocal()`. All artifacts use group `io.github.andymond` and version `0.1.0-SNAPSHOT`.
+
+| Artifact | Include when |
+| --- | --- |
+| `captain-hooks` | You use the core API with local receipts or application-supplied adapters. |
+| `captain-hooks-jdbc` | You want the JDBC archive or queue. Supply your database driver. Example SQL is packaged with this artifact. |
+| `captain-hooks-redis` | You want the Redis archive or queue. This artifact brings in Jedis. |
+| `captain-hooks-mongo` | You want the MongoDB archive or queue. This artifact brings in the MongoDB Java driver. |
+
+Each backend artifact brings in the core automatically. Include multiple adapters when your archive and queue use different backends.
 
 Create a `WebhookEndpoint(handler, secret, receiptsPath, archive, jobs)` with the storage your handler needs. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all values of each signature header and the original request stream.
 
@@ -97,7 +106,7 @@ call.respond(HttpStatusCode.fromValue(result.status))
 
 ## Verification
 
-- `mvn clean verify` builds the full library. `bash webhook test` runs the project’s core and CLI tests.
+- `mvn clean verify` builds the core and all backend modules. `bash webhook test` runs the project’s core and CLI tests.
 - For live JDBC tests, configure the driver and credentials, create the archive schema in a test database, and run `WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" bash webhook test`. Look for the archive and JDBC job storage PASS messages.
 - For live Redis or MongoDB checks, wire the adapters into a host and send a duplicate signed request. Expect two `204` responses, one completed job, and one archived body in archive mode.
 
