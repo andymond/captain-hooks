@@ -9,9 +9,9 @@ import java.sql.SQLException
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import kotlin.system.exitProcess
-import webhooks.ArchiveSqlDialect
-import webhooks.JdbcWebhookArchive
-import webhooks.LegacyPostgresJobs
+import webhooks.jdbc.JdbcDialect
+import webhooks.archive.JdbcWebhookArchive
+import webhooks.jobs.JdbcWebhookJobs
 import webhooks.ProcessingMode
 import webhooks.WebhookHandler
 import webhooks.postgresConnectionFactory
@@ -106,7 +106,7 @@ private fun serve(vendor: String, portArgument: String, root: Path, output: (Str
         return 2
     }
     var archive: JdbcWebhookArchive? = null
-    var jobs: LegacyPostgresJobs? = null
+    var jobs: JdbcWebhookJobs? = null
     if (async || handler.persistWebhooks) {
         val url = System.getenv("WEBHOOK_DATABASE_URL")
         if (url == null || !url.startsWith("jdbc:postgresql:")) {
@@ -123,13 +123,12 @@ private fun serve(vendor: String, portArgument: String, root: Path, output: (Str
             url, System.getenv("WEBHOOK_DATABASE_USER"), System.getenv("WEBHOOK_DATABASE_PASSWORD")
         )
         try {
-            if (async) {
-                jobs = LegacyPostgresJobs(connect).also { it.verifySchema() }
-            } else {
-                archive = JdbcWebhookArchive(ArchiveSqlDialect.POSTGRESQL, connect).also { it.verifySchema() }
+            if (async) jobs = JdbcWebhookJobs(JdbcDialect.POSTGRESQL, connect).also { it.createSchema() }
+            if (handler.persistWebhooks) {
+                archive = JdbcWebhookArchive(JdbcDialect.POSTGRESQL, connect).also { it.createSchema() }
             }
         } catch (failure: SQLException) {
-            output("Cannot access webhook storage (SQLSTATE ${failure.sqlState}). Check the connection and apply the database migrations in db/.")
+            output("Cannot access webhook storage (SQLSTATE ${failure.sqlState}). Check the connection and the storage schema.")
             return 1
         }
     }

@@ -6,6 +6,13 @@ import webhooks.*
 internal fun testAsyncWebhooks() = withTempDirectory { directory ->
     fun runOnce(worker: WebhookWorker) = runBlocking { worker.runOnce() }
     val queue = TestJobStore()
+    val originalBodies = mutableMapOf<Pair<String, String>, ByteArray>()
+    val archive = object : ReadableWebhookArchive {
+        override fun save(vendor: String, delivery: Delivery) {
+            originalBodies.putIfAbsent(vendor to delivery.id, delivery.body.copyOf())
+        }
+        override fun load(vendor: String, deliveryId: String) = originalBodies[vendor to deliveryId]
+    }
     val secret = "async-test".toByteArray()
     val incident = loadHandler("incident-alerts")
     val enter = CountDownLatch(1)
@@ -27,7 +34,7 @@ internal fun testAsyncWebhooks() = withTempDirectory { directory ->
     check(runCatching {
         WebhookEndpoint(invalidArchive, secret, directory, jobs = queue)
     }.exceptionOrNull() is IllegalArgumentException)
-    val alertEndpoint = WebhookEndpoint(slow, secret, directory, jobs = queue)
+    val alertEndpoint = WebhookEndpoint(slow, secret, directory, archive, queue)
     val fulfillment = loadHandler("shipment-updates")
     val shipmentEndpoint = WebhookEndpoint(fulfillment, secret, directory, jobs = queue)
 
@@ -46,8 +53,8 @@ internal fun testAsyncWebhooks() = withTempDirectory { directory ->
     check(send(alertEndpoint, "alert-1", "checkout is down") == 204)
     check(incidentCalls == 0)
     val alert = queue.submissions.single()
-    check(alert.projected == null && alert.archived?.decodeToString() == "checkout is down")
-    WebhookWorker(slow, queue).start().use {
+    check(alert.input == JobInput.Archived && archive.load(alert.vendor, alert.deliveryId)?.decodeToString() == "checkout is down")
+    WebhookWorker(slow, queue, archive).start().use {
         try {
             check(enter.await(5, TimeUnit.SECONDS))
             check(send(alertEndpoint, "alert-1", "checkout is down") == 204)
@@ -65,21 +72,22 @@ internal fun testAsyncWebhooks() = withTempDirectory { directory ->
     check(send(shipmentEndpoint, "shipment-1", input) == 204)
     check(send(shipmentEndpoint, "shipment-1", "invalid retry") == 204)
     val shipment = queue.submissions.last()
-    check(shipment.archived == null)
-    check(shipment.projected?.decodeToString() == "v1\norderId=123&trackingNumber=ZX9&status=shipped")
+    check(archive.load(shipment.vendor, shipment.deliveryId) == null)
+    val projected = (shipment.input as JobInput.Projected).body
+    check(projected.decodeToString() == "v1\norderId=123&trackingNumber=ZX9&status=shipped")
     check(runOnce(WebhookWorker(fulfillment, queue)))
     check(queue.completed == listOf("alert-1", "shipment-1"))
 
     val archivingFulfillment = object : ProjectedWebhookHandler by (fulfillment as ProjectedWebhookHandler) {
         override val persistWebhooks = true
     }
-    val archivingEndpoint = WebhookEndpoint(archivingFulfillment, secret, directory, jobs = queue)
+    val archivingEndpoint = WebhookEndpoint(archivingFulfillment, secret, directory, archive, queue)
     check(send(archivingEndpoint, "shipment-with-archive", input) == 204)
-    check(queue.submissions.last().archived?.decodeToString() == input)
-    check(queue.submissions.last().projected?.contentEquals(checkNotNull(shipment.projected)) == true)
+    check(archive.load(archivingFulfillment.vendor, "shipment-with-archive")?.decodeToString() == input)
+    check((queue.submissions.last().input as JobInput.Projected).body.contentEquals(projected))
     check(runOnce(WebhookWorker(archivingFulfillment, queue)))
 
-    queue.enqueue(fulfillment.vendor, Delivery("unsupported", byteArrayOf()), "v2".toByteArray(), false)
+    queue.enqueue(WebhookJob(fulfillment.vendor, "unsupported", JobInput.Projected("v2".toByteArray())))
     check(runOnce(WebhookWorker(fulfillment, queue)))
     check(queue.failures.last() == Triple("unsupported", true, 1))
 
@@ -134,47 +142,42 @@ internal fun testAsyncWebhooks() = withTempDirectory { directory ->
 }
 
 private class TestJobStore : WebhookJobs {
-    data class Submission(
-        val vendor: String, val id: String, val projected: ByteArray?, val archived: ByteArray?
-    )
-
-    val submissions = mutableListOf<Submission>()
+    val submissions = mutableListOf<WebhookJob>()
     val completed = mutableListOf<String>()
     val alertCompleted = CountDownLatch(1)
     val failures = mutableListOf<Triple<String, Boolean, Int>>()
     var unavailable = false
-    private val pending = ArrayDeque<Pair<Submission, Int>>()
+    private val pending = ArrayDeque<Pair<WebhookJob, Int>>()
 
     @Synchronized
-    override fun enqueue(vendor: String, delivery: Delivery, projected: ByteArray?, archive: Boolean) {
+    override fun enqueue(job: WebhookJob) {
         check(!unavailable)
-        if (contains(vendor, delivery.id)) return
-        val job = Submission(vendor, delivery.id, projected, delivery.body.takeIf { archive })
+        if (contains(job.vendor, job.deliveryId)) return
         submissions += job
         pending.addLast(job to 1)
     }
 
     @Synchronized
-    override fun contains(vendor: String, id: String): Boolean =
-        submissions.any { it.vendor == vendor && it.id == id }
+    override fun contains(vendor: String, deliveryId: String): Boolean =
+        submissions.any { it.vendor == vendor && it.deliveryId == deliveryId }
 
     @Synchronized
-    override fun claim(vendor: String, projected: Boolean): ClaimedWebhook? {
-        val index = pending.indexOfFirst { it.first.vendor == vendor && (it.first.projected != null) == projected }
+    override fun claim(vendor: String, kind: JobKind): ClaimedWebhook? {
+        val index = pending.indexOfFirst { it.first.vendor == vendor && it.first.input.kind == kind }
         if (index == -1) return null
         val (job, attempt) = pending.removeAt(index)
-        return ClaimedWebhook(vendor, Delivery(job.id, job.projected ?: requireNotNull(job.archived)), attempt, java.util.UUID.randomUUID())
+        return ClaimedWebhook(job, attempt, java.util.UUID.randomUUID())
     }
 
     @Synchronized
-    override fun complete(job: ClaimedWebhook) {
-        completed += job.delivery.id
-        if (job.delivery.id == "alert-1") alertCompleted.countDown()
+    override fun complete(claim: ClaimedWebhook) {
+        completed += claim.job.deliveryId
+        if (claim.job.deliveryId == "alert-1") alertCompleted.countDown()
     }
 
     @Synchronized
-    override fun fail(job: ClaimedWebhook, terminal: Boolean, delaySeconds: Int, failure: String) {
-        failures += Triple(job.delivery.id, terminal, delaySeconds)
-        if (!terminal) pending.addLast(submissions.single { it.vendor == job.vendor && it.id == job.delivery.id } to (job.attempt + 1))
+    override fun fail(claim: ClaimedWebhook, terminal: Boolean, delaySeconds: Int, failure: String) {
+        failures += Triple(claim.job.deliveryId, terminal, delaySeconds)
+        if (!terminal) pending.addLast(claim.job to (claim.attempt + 1))
     }
 }

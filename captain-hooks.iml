@@ -6,6 +6,10 @@
       <sourceFolder url="file://$MODULE_DIR$/resources" type="java-resource" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/library" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/adapters/jdbc" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/adapters/archive/jdbc" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/adapters/jobs/jdbc" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/adapters/jobs/shared" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/test" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/testResources" type="java-test-resource" />
     </content>

@@ -39,13 +39,11 @@ class WebhookEndpoint @JvmOverloads constructor(
         require(vendorName.matches(handler.vendor))
         require(mode != ProcessingMode.ASYNC_ARCHIVE || handler.persistWebhooks)
         require(mode != ProcessingMode.ASYNC_PROJECTED || handler is ProjectedWebhookHandler)
-        require(mode != ProcessingMode.SYNC || !handler.persistWebhooks || this.archive != null)
-        require(queue == null || !handler.persistWebhooks || this.archive != null || queue.supportsEmbeddedArchive) {
-            "This job queue requires an independently configured archive."
+        require(!handler.persistWebhooks || this.archive != null) {
+            "persistWebhooks requires an archive."
         }
-        if (mode == ProcessingMode.ASYNC_ARCHIVE && this.archive != null) {
-            require(readableArchive != null) { "Async archive mode requires a readable archive." }
-            require(queue?.supportsExternalArchive == true) { "The job queue must support external archive references." }
+        require(mode != ProcessingMode.ASYNC_ARCHIVE || readableArchive != null) {
+            "Async archive mode requires a readable archive."
         }
     }
 
@@ -125,12 +123,10 @@ class WebhookEndpoint @JvmOverloads constructor(
             }
         } else null
         return try {
-            if (archive == null) {
-                queue.enqueue(handler.vendor, delivery, projection, handler.persistWebhooks)
-            } else if (!queue.contains(handler.vendor, delivery.id)) {
-                archive.save(handler.vendor, delivery)
-                if (projection == null) queue.enqueueArchiveReference(handler.vendor, delivery.id)
-                else queue.enqueue(handler.vendor, delivery, projection, archive = false)
+            if (archive == null || !queue.contains(handler.vendor, delivery.id)) {
+                archive?.save(handler.vendor, delivery)
+                val input = if (projection == null) JobInput.Archived else JobInput.Projected(projection)
+                queue.enqueue(WebhookJob(handler.vendor, delivery.id, input))
             }
             204
         } catch (failure: Exception) {

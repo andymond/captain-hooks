@@ -16,10 +16,10 @@ The generator creates `src/webhooks/<namespace>/Handler.kt` and protects existin
 | Mode | What the handler receives | Example |
 | --- | --- | --- |
 | `SYNC` | The original body during the request | Default for generated handlers. Enable `persistWebhooks` to archive verified deliveries before handling. |
-| `ASYNC_ARCHIVE` | The original body loaded from the PostgreSQL archive | `incident-alerts` retains the full alert for attaching it to an incident record. This mode requires `persistWebhooks = true`. |
+| `ASYNC_ARCHIVE` | The original body loaded from the configured archive | `incident-alerts` retains the full alert for attaching it to an incident record. This mode requires `persistWebhooks = true`. |
 | `ASYNC_PROJECTED` | The bytes returned by `ProjectedWebhookHandler.project` | `shipment-updates` queues a versioned record with only the order ID, tracking number, and status. The sample leaves archiving off. Enabling it also stores the original body. |
 
-Both async demo modes verify the signature and commit one job per vendor and delivery ID before returning HTTP `204`. The CLI demo commits new jobs and archive writes in one PostgreSQL transaction. An accepted duplicate returns `204`, malformed projected input returns `400`, and unavailable storage returns `503` with `Retry-After: 1`. Keep projection limited to local parsing and field selection.
+Both async modes verify the signature and durably enqueue one job per vendor and delivery ID before returning HTTP `204`. Archive mode saves the original body before enqueueing its reference. An accepted duplicate returns `204`, malformed projected input returns `400`, and unavailable storage returns `503` with `Retry-After: 1`. Keep projection limited to local parsing and field selection.
 
 Each async server starts one coroutine worker for its vendor. Idle polling suspends, and blocking JDBC and handler calls use the shared I/O dispatcher. Shutdown cancels the worker. A claim interrupted during shutdown can be recovered after its lease expires. Jobs use a five-minute lease and retry handler exceptions with exponential backoff, up to five attempts. A handler can throw `PermanentWebhookFailure` to stop retries immediately. Failed jobs remain available for inspection. When a job completes, its row remains for deduplication and the queue releases its projected payload or archive reference. Keep the archive row while any job still references it. Allow existing jobs to finish before switching a vendor's processing mode, and keep workers compatible with queued projection versions. Switching a vendor from sync to async starts using database deduplication for newly accepted deliveries. Existing filesystem receipts are not imported.
 
@@ -33,7 +33,6 @@ Start Postgres.app, then create the local database if needed and apply the migra
 createdb webhook_dev
 psql -d webhook_dev -v ON_ERROR_STOP=1 -f db/001_webhook_deliveries.sql
 psql -d webhook_dev -v ON_ERROR_STOP=1 -f db/002_webhook_jobs.sql
-psql -d webhook_dev -v ON_ERROR_STOP=1 -f db/003_external_archive.sql
 ```
 
 Download the [PostgreSQL JDBC driver](https://jdbc.postgresql.org/download/) and point the launcher at its JAR. Set `WEBHOOK_DATABASE_PASSWORD` if your PostgreSQL role requires a password.
@@ -74,13 +73,13 @@ send_hook shipment-1 'orderId=123&trackingNumber=ZX9&status=shipped&address=42+P
 Both endpoints return `204`. The incident worker reports the size of the original alert. The shipment worker reports the order, tracking number, and status. Only the incident has a row in the raw archive.
 
 ```sh
-psql -d webhook_dev -c 'SELECT vendor, delivery_id, state, attempts, last_error FROM webhook_jobs;'
+psql -d webhook_dev -c 'SELECT vendor, delivery_id, attempts, due_at, leased, last_error FROM captain_webhook_jobs;'
 psql -d webhook_dev -c 'SELECT vendor, delivery_id, octet_length(body) AS bytes FROM webhook_deliveries;'
 ```
 
 The generic signing format uses HMAC-SHA256 over the delivery ID, a newline byte, and the raw request body. Send the digest as `sha256=<hex>` in `X-Webhook-Signature`. Use a stable ID of 1–128 ASCII letters, digits, or characters from `._:-` in `X-Webhook-Delivery`.
 
-To also run the PostgreSQL integration tests, point at a test database with the migrations applied. The tests write and clean up their own rows and create a session-local temporary table to exercise rollback.
+To also run the PostgreSQL integration tests, point at a test database with the migrations applied. The tests write and clean up their own rows and exercise JDBC archive and queue behavior.
 
 ```sh
 WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" ./webhook test
@@ -88,7 +87,7 @@ WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" ./webhook test
 
 ## Embed Captain Hooks in Spring or Ktor
 
-Run `mvn install` to build and install `io.github.andymond:captain-hooks:0.1.0-SNAPSHOT` in your Maven local repository. In Gradle, add `mavenLocal()` to repositories and use `implementation("io.github.andymond:captain-hooks:0.1.0-SNAPSHOT")`. The artifact contains the core, archive adapters, and SQL migrations. The CLI and sample handlers are separate. For an offline core-only JAR, run `./webhook build-core`.
+Run `mvn install` to build and install `io.github.andymond:captain-hooks:0.1.0-SNAPSHOT` in your Maven local repository. In Gradle, add `mavenLocal()` to repositories and use `implementation("io.github.andymond:captain-hooks:0.1.0-SNAPSHOT")`. The artifact contains the core, archive and queue adapters, and SQL migrations. The CLI and sample handlers are separate. For an offline core and JDBC JAR, run `./webhook build-core`.
 
 Construct a `webhooks.WebhookEndpoint` with your handler, signature secret, and a directory for synchronous delivery receipts. Pass an archive when enabling `persistWebhooks`. Hosts running an async handler also pass a `WebhookJobs` implementation and close the handle returned by `endpoint.startWorker()` on shutdown.
 
@@ -96,25 +95,37 @@ Construct a `webhooks.WebhookEndpoint` with your handler, signature secret, and 
 
 | Archive | Construction | Setup |
 | --- | --- | --- |
-| SQL | `JdbcWebhookArchive(dataSource, ArchiveSqlDialect.POSTGRESQL)` | Supply the application's pooled JDBC `DataSource` and driver. Other dialects are `MYSQL`, `MARIADB`, `H2`, and `SQLITE`. Run `createSchema()` during setup or apply an equivalent migration. |
+| SQL | `JdbcWebhookArchive(dataSource, JdbcDialect.POSTGRESQL)` | Supply the application's pooled JDBC `DataSource` and driver. Other dialects are `MYSQL`, `MARIADB`, `H2`, and `SQLITE`. Run `createSchema()` during setup or apply an equivalent migration. |
 | Redis | `RedisWebhookArchive(redis)` | Add `redis.clients:jedis:5.2.0` and pass an application-managed `UnifiedJedis` client. Use persistent Redis with an eviction policy that preserves archive keys. |
 | MongoDB | `MongoWebhookArchive(database.getCollection("webhook_deliveries"))` | Add `org.mongodb:mongodb-driver-sync:5.5.0` and pass a `MongoCollection<Document>` with acknowledged writes. |
 
-`JdbcWebhookArchive`, `RedisWebhookArchive`, and `MongoWebhookArchive` save the first payload for each vendor and delivery ID. Redis and Mongo adapters live in the `webhooks.archive` package. The host owns each database client and its credentials, pooling, durability, and shutdown configuration.
+`JdbcWebhookArchive`, `RedisWebhookArchive`, and `MongoWebhookArchive` save the first payload for each vendor and delivery ID. All archive adapters live in `webhooks.archive`. The shared SQL dialect enum is `webhooks.jdbc.JdbcDialect`. The host owns each database client and its credentials, pooling, durability, and shutdown configuration.
 
 ### Choose a job queue independently
 
 | Queue | Construction | Setup |
 | --- | --- | --- |
-| SQL | `JdbcWebhookJobs(dataSource, ArchiveSqlDialect.H2)` | Use any of the archive SQL dialects. Call `createSchema()` during setup. For high-volume polling, index `captain_webhook_jobs(vendor, input_kind, due_at)` in your migrations. |
+| SQL | `JdbcWebhookJobs(dataSource, JdbcDialect.H2)` | Use any of the archive SQL dialects. Call `createSchema()` during setup. For high-volume polling, index `captain_webhook_jobs(vendor, input_kind, due_at)` in your migrations. |
 | Redis | `RedisWebhookJobs(redis)` | Supply an application-managed Jedis client. Use persistent, non-evicting Redis. |
 | MongoDB | `MongoWebhookJobs(database.getCollection("webhook_jobs"))` | Supply an acknowledged collection and call `createIndexes()` during setup. |
 
-The Redis and Mongo queue adapters live in `webhooks.jobs`. Configure a `WebhookArchive` independently when an async handler has `persistWebhooks = true`. You can use a JDBC queue with a MongoDB archive, a Redis queue with a JDBC archive, or another combination. Projected handlers with archiving disabled need only a queue.
+All queue adapters live in `webhooks.jobs`. Configure a `WebhookArchive` independently when an async handler has `persistWebhooks = true`. You can use a JDBC queue with a MongoDB archive, a Redis queue with a JDBC archive, or another combination. Projected handlers with archiving disabled need only a queue.
 
 With an independent archive, saving the payload and enqueueing are two writes. If the save succeeds and enqueueing fails, the archive retains the original and the endpoint returns `503`. A sender retry safely reuses that record. Keep archived bodies until all jobs that reference them can finish retrying. Queue workers use the host clocks for lease times, so synchronize clocks across worker instances.
 
-The existing CLI demos retain their PostgreSQL transaction and migration files for compatibility. The library's JDBC queue uses its own `captain_webhook_jobs` table. Drain existing demo jobs before switching stores. Custom queues can implement `WebhookJobs` directly.
+The CLI demos use `JdbcWebhookJobs` and `JdbcWebhookArchive` with the PostgreSQL dialect. If you ran an earlier version that used the `webhook_jobs` table, stop the old workers, apply `db/002_webhook_jobs.sql`, then run `db/migrate/legacy_postgres_jobs.sql` before restarting. The migration copies queued jobs and deduplication records into `captain_webhook_jobs` and leaves the originals in place. Keep each vendor pointed at the archive its existing jobs reference.
+
+### Code layout
+
+- `library/webhooks` defines the endpoint, handler, worker, and storage interfaces. `WebhookJob` carries either `JobInput.Projected` bytes or an `Archived` reference identified by its vendor and delivery ID.
+- `adapters/archive` contains the JDBC, Redis, and MongoDB implementations of first-write-wins payload storage.
+- `adapters/jobs` contains the JDBC, Redis, and MongoDB queues. Its shared code handles attempts, retry scheduling, and lease expiry. Each backend implements atomic record insertion and compare-and-set updates.
+- `adapters/jdbc` contains the SQL types and error handling shared by the JDBC adapters.
+- `src` contains the CLI, JDK HTTP bridge, and demo handlers.
+
+The JDBC queue polls due rows in `captain_webhook_jobs` and claims one by updating it only if its revision still matches. The resulting revision also fences completion and retry updates. SQL dialect selection controls binary column types, key collation, and duplicate-key detection. The claim query and update are shared across dialects.
+
+Custom queues implement `WebhookJobs`. The endpoint saves archived deliveries and the worker reads them through `ReadableWebhookArchive`. Queue implementations store the job input and have no archive dependency.
 
 
 ### Spring MVC or Spring Boot
@@ -129,8 +140,8 @@ import javax.sql.DataSource
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import webhooks.ArchiveSqlDialect
-import webhooks.JdbcWebhookArchive
+import webhooks.jdbc.JdbcDialect
+import webhooks.archive.JdbcWebhookArchive
 import webhooks.WebhookArchive
 import webhooks.WebhookEndpoint
 import webhooks.WebhookHandler
@@ -139,7 +150,7 @@ import webhooks.WebhookHandler
 class WebhookConfiguration {
     @Bean
     fun archive(dataSource: DataSource): WebhookArchive =
-        JdbcWebhookArchive(dataSource, ArchiveSqlDialect.POSTGRESQL)
+        JdbcWebhookArchive(dataSource, JdbcDialect.POSTGRESQL)
 
     @Bean
     fun endpoint(

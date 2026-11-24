@@ -19,26 +19,22 @@ internal fun testLibrary() = withTempDirectory { directory ->
     var completed = false
     var failureCount = 0
     val jobs = object : WebhookJobs {
-        override val supportsExternalArchive = true
-
-        override fun enqueue(vendor: String, delivery: Delivery, projected: ByteArray?, archive: Boolean) =
-            error("Expected a reference-only enqueue")
-
-        override fun enqueueArchiveReference(vendor: String, deliveryId: String) {
+        override fun enqueue(job: WebhookJob) {
             check(queueAvailable)
-            pending = ClaimedWebhook(vendor, Delivery(deliveryId, byteArrayOf()), 1, UUID.randomUUID(), true)
+            check(job.input == JobInput.Archived)
+            pending = ClaimedWebhook(job, 1, UUID.randomUUID())
         }
 
-        override fun contains(vendor: String, id: String) = pending?.delivery?.id == id
+        override fun contains(vendor: String, deliveryId: String) = pending?.job?.deliveryId == deliveryId
 
-        override fun claim(vendor: String, projected: Boolean): ClaimedWebhook? {
+        override fun claim(vendor: String, kind: JobKind): ClaimedWebhook? {
             if (held || completed) return null
             return pending?.also { held = true }
         }
 
-        override fun complete(job: ClaimedWebhook) { completed = true }
+        override fun complete(claim: ClaimedWebhook) { completed = true }
 
-        override fun fail(job: ClaimedWebhook, terminal: Boolean, delaySeconds: Int, failure: String) {
+        override fun fail(claim: ClaimedWebhook, terminal: Boolean, delaySeconds: Int, failure: String) {
             check(!terminal)
             failureCount++
             held = false
@@ -67,7 +63,7 @@ internal fun testLibrary() = withTempDirectory { directory ->
     queueAvailable = true
     check(send("external-1").status == 204)
     check(send("external-1").status == 204)
-    check(pending?.delivery?.body?.isEmpty() == true && handled == 0)
+    check(pending?.job?.input == JobInput.Archived && handled == 0)
     archived.clear()
     val worker = WebhookWorker(handler, jobs, archive)
     check(runBlocking { worker.runOnce() } && failureCount == 1 && handled == 0)

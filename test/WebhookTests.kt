@@ -46,7 +46,7 @@ fun main() {
     testPortableQueue()
     testWebhookPersistence()
     testPostgresArchive()
-    testPostgresJobs()
+    testJdbcJobs()
 }
 
 private fun testEndpoint() = withTempDirectory { directory ->
