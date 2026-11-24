@@ -26,11 +26,24 @@ private const val MAX_BODY_BYTES = 1024 * 1024
 class WebhookEndpoint @JvmOverloads constructor(
     private val handler: WebhookHandler,
     secret: ByteArray,
-    dataDirectory: Path,
+    receipts: DeliveryReceipts? = null,
     archive: WebhookArchive? = null,
     jobs: WebhookJobs? = null
 ) {
+    /** Convenience constructor for applications using local filesystem receipts. */
+    @JvmOverloads
+    constructor(
+        handler: WebhookHandler,
+        secret: ByteArray,
+        dataDirectory: Path,
+        archive: WebhookArchive? = null,
+        jobs: WebhookJobs? = null
+    ) : this(handler, secret, FileDeliveryReceipts(dataDirectory), archive, jobs)
+
     private val mode = handler.processingMode
+    private val receipts = if (mode == ProcessingMode.SYNC) {
+        requireNotNull(receipts) { "Synchronous handling requires delivery receipts." }
+    } else null
     private val queue = if (mode != ProcessingMode.SYNC) requireNotNull(jobs) else null
     private val archive = archive.takeIf { handler.persistWebhooks }
     private val readableArchive = this.archive as? ReadableWebhookArchive
@@ -49,7 +62,6 @@ class WebhookEndpoint @JvmOverloads constructor(
 
     val route = "/webhooks/${handler.vendor}"
     private val key = SecretKeySpec(secret, "HmacSHA256")
-    private val store = if (mode == ProcessingMode.SYNC) DeliveryStore(dataDirectory.resolve(handler.vendor)) else null
 
     /** Start the worker when the host starts and close it when the host stops. */
     fun startWorker(): AutoCloseable? = queue?.let { WebhookWorker(handler, it, readableArchive).start() }
@@ -86,23 +98,30 @@ class WebhookEndpoint @JvmOverloads constructor(
         val delivery = Delivery(id, payload)
         queue?.let { return enqueue(it, delivery) }
         return try {
-            when (checkNotNull(store).process(id) {
+            when (checkNotNull(receipts).process(handler.vendor, id) {
                 try {
                     archive?.save(handler.vendor, delivery)
                 } catch (failure: Exception) {
                     throw WebhookArchiveUnavailable(failure)
                 }
-                handler.handle(delivery)
+                try {
+                    handler.handle(delivery)
+                } catch (failure: Exception) {
+                    throw WebhookHandlerFailure(failure)
+                }
             }) {
-                DeliveryStore.Result.PROCESSED, DeliveryStore.Result.DUPLICATE -> 204
-                DeliveryStore.Result.BUSY -> 503
+                ReceiptResult.PROCESSED, ReceiptResult.DUPLICATE -> 204
+                ReceiptResult.BUSY -> 503
             }
         } catch (failure: WebhookArchiveUnavailable) {
             System.err.println("Webhook archive unavailable for ${handler.vendor} (${failure.cause?.javaClass?.simpleName})")
             503
-        } catch (failure: Exception) {
-            System.err.println("Webhook processing failed for ${handler.vendor} (${failure.javaClass.simpleName})")
+        } catch (failure: WebhookHandlerFailure) {
+            System.err.println("Webhook processing failed for ${handler.vendor} (${failure.cause?.javaClass?.simpleName})")
             500
+        } catch (failure: Exception) {
+            System.err.println("Webhook receipts unavailable for ${handler.vendor} (${failure.javaClass.simpleName})")
+            503
         }
     }
     private fun enqueue(queue: WebhookJobs, delivery: Delivery): Int {
@@ -136,6 +155,8 @@ class WebhookEndpoint @JvmOverloads constructor(
     }
 
 }
+
+private class WebhookHandlerFailure(cause: Exception) : RuntimeException(cause)
 
 private class WebhookArchiveUnavailable(cause: Exception) : RuntimeException(cause)
 

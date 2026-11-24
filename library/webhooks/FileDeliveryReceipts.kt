@@ -9,27 +9,31 @@ import java.security.MessageDigest
 import java.util.HexFormat
 import java.util.concurrent.ConcurrentHashMap
 
-internal class DeliveryStore(directory: Path) {
-    enum class Result { PROCESSED, DUPLICATE, BUSY }
+/** Stores receipts on disk and coordinates claims using filesystem locks. */
+class FileDeliveryReceipts(private val root: Path) : DeliveryReceipts {
+    private val directories = ConcurrentHashMap<String, Path>()
 
-    private val directory = Files.createDirectories(directory).toRealPath()
-
-    fun process(id: String, handle: () -> Unit): Result {
-        val key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(id.toByteArray()))
+    override fun process(vendor: String, deliveryId: String, handle: () -> Unit): ReceiptResult {
+        require(vendorName.matches(vendor))
+        val directory = directories.computeIfAbsent(vendor) {
+            Files.createDirectories(root.resolve(it)).toRealPath()
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(deliveryId.toByteArray())
+        val key = HexFormat.of().formatHex(digest)
         val receipt = directory.resolve("$key.done")
-        if (Files.exists(receipt)) return Result.DUPLICATE
+        if (Files.exists(receipt)) return ReceiptResult.DUPLICATE
 
         val lockPath = directory.resolve("$key.lock")
-        if (!activeLocks.add(lockPath)) return Result.BUSY
+        if (!activeLocks.add(lockPath)) return ReceiptResult.BUSY
         try {
             // Keep the lock file so processes always lock the same inode for a given ID.
             FileChannel.open(lockPath, CREATE, WRITE).use { channel ->
-                val lock = channel.tryLock() ?: return Result.BUSY
+                val lock = channel.tryLock() ?: return ReceiptResult.BUSY
                 lock.use {
-                    if (Files.exists(receipt)) return Result.DUPLICATE
+                    if (Files.exists(receipt)) return ReceiptResult.DUPLICATE
                     handle()
                     Files.createFile(receipt)
-                    return Result.PROCESSED
+                    return ReceiptResult.PROCESSED
                 }
             }
         } finally {

@@ -64,7 +64,7 @@ The signature covers the delivery ID, a newline byte, and the raw body. Use a st
 
 Run `mvn install` and depend on `io.github.andymond:captain-hooks:0.1.0-SNAPSHOT` from your local Maven repository. Gradle consumers can add `mavenLocal()`. Add Jedis or the MongoDB Java driver if you use those adapters.
 
-Create a `WebhookEndpoint(handler, secret, receiptsPath, archive, jobs)` with the storage your handler needs. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all values of each signature header and the original request stream.
+Create a `WebhookEndpoint(handler, secret, receipts = receipts, archive = archive, jobs = jobs)` with the storage your handler needs. For synchronous handling, pass a `DeliveryReceipts` implementation backed by your infrastructure or use `FileDeliveryReceipts(path)`. Your receipt adapter claims each vendor and delivery ID atomically and marks completion only after the handler succeeds. Async handlers use their queue for deduplication. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all values of each signature header and the original request stream.
 
 **Spring MVC or Spring Boot** registers the endpoint as a bean. Inside the controller, forward the request to the blocking API:
 
