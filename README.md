@@ -58,30 +58,56 @@ curl -i --data-binary "$body" \
   http://127.0.0.1:8080/webhooks/incident_alerts
 ```
 
-The signature covers the delivery ID, a newline byte, and the raw body. Use a stable ID containing 1–128 ASCII letters, digits, or characters from `._:-`.
+The demo signature covers the delivery ID, a newline byte, and the raw body. Use a stable ID containing 1–128 ASCII letters, digits, or characters from `._:-`.
+
+## Use a provider's signature scheme
+
+Implement `WebhookSignatureVerifier` with your provider's SDK. The verifier receives the original request bytes and all header values, and returns an authenticated delivery ID for deduplication. Captain Hooks' demo verifier compares fixed-size HMAC digests with [`MessageDigest.isEqual`](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/security/MessageDigest.html#isEqual(byte%5B%5D,byte%5B%5D)).
+
+For example, an application using the [Stripe Java SDK](https://docs.stripe.com/webhooks/signature) can verify the header and read the event ID with its existing JSON parser:
+
+```kotlin
+import com.stripe.exception.SignatureVerificationException
+import com.stripe.net.Webhook
+import java.io.IOException
+import webhooks.SignatureVerification
+import webhooks.WebhookSignatureVerifier
+
+val verifier = WebhookSignatureVerifier { headers, rawBody ->
+    val signature = headers.filterKeys { it.equals("Stripe-Signature", ignoreCase = true) }
+        .values.flatten().singleOrNull()
+        ?: return@WebhookSignatureVerifier SignatureVerification.InvalidSignature
+
+    try {
+        val payload = rawBody.decodeToString(throwOnInvalidSequence = true)
+        if (!Webhook.Signature.verifyHeader(payload, signature, stripeEndpointSecret, 300L)) {
+            return@WebhookSignatureVerifier SignatureVerification.InvalidSignature
+        }
+        val id = objectMapper.readTree(rawBody)?.path("id")?.textValue()
+        if (id.isNullOrBlank()) SignatureVerification.InvalidDelivery
+        else SignatureVerification.Verified(id)
+    } catch (_: SignatureVerificationException) {
+        SignatureVerification.InvalidSignature
+    } catch (_: IOException) {
+        SignatureVerification.InvalidDelivery
+    }
+}
+```
+
+Pass it as `WebhookEndpoint(handler, verifier, receipts = receipts)` for a synchronous handler. The application supplies `stripeEndpointSecret`, its JSON mapper, and the Stripe SDK dependency.
 
 ## Embed in Spring or Ktor
 
-Run `mvn install` from the repository root to install the modules locally. Gradle consumers can add `mavenLocal()`. All artifacts use group `io.github.andymond` and version `0.1.0-SNAPSHOT`.
+Run `mvn install` and depend on `io.github.andymond:captain-hooks:0.1.0-SNAPSHOT` from your local Maven repository. Gradle consumers can add `mavenLocal()`. Add Jedis or the MongoDB Java driver if you use those adapters.
 
-| Artifact | Include when |
-| --- | --- |
-| `captain-hooks` | You use the core API with local receipts or application-supplied adapters. |
-| `captain-hooks-jdbc` | You want the JDBC archive or queue. Supply your database driver. Example SQL is packaged with this artifact. |
-| `captain-hooks-redis` | You want the Redis archive or queue. This artifact brings in Jedis. |
-| `captain-hooks-mongo` | You want the MongoDB archive or queue. This artifact brings in the MongoDB Java driver. |
-
-Each backend artifact brings in the core automatically. Include multiple adapters when your archive and queue use different backends.
-
-Create a `WebhookEndpoint(handler, secret, receipts = receipts, archive = archive, jobs = jobs)` with the storage your handler needs. For synchronous handling, pass a `DeliveryReceipts` implementation backed by your infrastructure or use `FileDeliveryReceipts(path)`. Your receipt adapter claims each vendor and delivery ID atomically and marks completion only after the handler succeeds. Async handlers use their queue for deduplication. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all values of each signature header and the original request stream.
+Create a `WebhookEndpoint(handler, secret, receipts = receipts, archive = archive, jobs = jobs)` with the storage your handler needs. For synchronous handling, pass a `DeliveryReceipts` implementation backed by your infrastructure or use `FileDeliveryReceipts(path)`. Your receipt adapter claims each vendor and delivery ID atomically and marks completion only after the handler succeeds. Async handlers use their queue for deduplication. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all request headers and the original body stream to the verifier.
 
 **Spring MVC or Spring Boot** registers the endpoint as a bean. Inside the controller, forward the request to the blocking API:
 
 ```kotlin
 val result = endpoint.handle(
     request.method,
-    request.getHeaders("X-Webhook-Delivery").toList(),
-    request.getHeaders("X-Webhook-Signature").toList(),
+    request.headerNames.toList().associateWith { request.getHeaders(it).toList() },
     request.inputStream
 )
 return ResponseEntity.status(result.status).apply {
@@ -95,8 +121,7 @@ return ResponseEntity.status(result.status).apply {
 val result = call.receiveChannel().toInputStream().use { body ->
     endpoint.handleAsync(
         "POST",
-        call.request.headers.getAll("X-Webhook-Delivery").orEmpty(),
-        call.request.headers.getAll("X-Webhook-Signature").orEmpty(),
+        call.request.headers.entries().associate { it.key to it.value },
         body
     )
 }
@@ -106,7 +131,7 @@ call.respond(HttpStatusCode.fromValue(result.status))
 
 ## Verification
 
-- `mvn clean verify` builds the core and all backend modules. `bash webhook test` runs the project’s core and CLI tests.
+- `mvn clean verify` builds the full library. `bash webhook test` runs the project’s core and CLI tests.
 - For live JDBC tests, configure the driver and credentials, create the archive schema in a test database, and run `WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" bash webhook test`. Look for the archive and JDBC job storage PASS messages.
 - For live Redis or MongoDB checks, wire the adapters into a host and send a duplicate signed request. Expect two `204` responses, one completed job, and one archived body in archive mode.
 

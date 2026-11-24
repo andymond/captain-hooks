@@ -37,8 +37,7 @@ internal fun startWebhookServer(
             val response = if (exchange.requestURI.rawPath == endpoint.route) {
                 endpoint.handle(
                     exchange.requestMethod,
-                    exchange.requestHeaders["X-Webhook-Delivery"].orEmpty(),
-                    exchange.requestHeaders["X-Webhook-Signature"].orEmpty(),
+                    exchange.requestHeaders,
                     exchange.requestBody
                 )
             } else WebhookResponse(404)

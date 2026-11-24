@@ -47,6 +47,7 @@ fun main() {
     testAsyncWebhooks()
     testLibrary()
     testInjectedReceipts()
+    testPluggableSignatures()
     testPortableQueue()
     testWebhookPersistence()
     testPostgresArchive()
