@@ -14,7 +14,7 @@ internal fun testAsyncWebhooks() = withTempDirectory { directory ->
         override fun load(vendor: String, deliveryId: String) = originalBodies[vendor to deliveryId]
     }
     val secret = "async-test".toByteArray()
-    val incident = loadHandler("incident-alerts")
+    val incident = loadHandler("incident_alerts")
     val enter = CountDownLatch(1)
     val release = CountDownLatch(1)
     var incidentCalls = 0
@@ -35,8 +35,10 @@ internal fun testAsyncWebhooks() = withTempDirectory { directory ->
         WebhookEndpoint(invalidArchive, secret, directory, jobs = queue)
     }.exceptionOrNull() is IllegalArgumentException)
     val alertEndpoint = WebhookEndpoint(slow, secret, directory, archive, queue)
-    val fulfillment = loadHandler("shipment-updates")
+    val fulfillment = loadHandler("shipment_updates")
     val shipmentEndpoint = WebhookEndpoint(fulfillment, secret, directory, jobs = queue)
+    check(alertEndpoint.route == "/webhooks/incident_alerts")
+    check(shipmentEndpoint.route == "/webhooks/shipment_updates")
 
     fun send(endpoint: WebhookEndpoint, id: String, text: String, valid: Boolean = true): Int {
         val body = text.toByteArray()

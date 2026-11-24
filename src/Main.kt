@@ -37,7 +37,7 @@ internal fun runCli(args: Array<String>, root: Path, output: (String) -> Unit): 
     }
     val vendor = args[1].lowercase(Locale.ROOT)
     if (!vendorName.matches(vendor)) {
-        output("Use a vendor name starting with a letter, with up to 63 letters, digits, or hyphens.")
+        output("Use a vendor name of 1–63 letters, digits, or underscores, starting with a letter.")
         return 2
     }
     if (command == "generate") return generateHandler(vendor, root, output)
@@ -45,12 +45,12 @@ internal fun runCli(args: Array<String>, root: Path, output: (String) -> Unit): 
 }
 
 private fun generateHandler(vendor: String, root: Path, output: (String) -> Unit): Int {
-    val namespace = namespace(vendor)
-    val target = root.resolve("src/webhooks/$namespace/Handler.kt")
+    val packageName = if (vendor in kotlinKeywords) "`$vendor`" else vendor
+    val target = root.resolve("src/webhooks/$vendor/Handler.kt")
     Files.createDirectories(target.parent)
     try {
         Files.writeString(target, """
-            package webhooks.${if (namespace in kotlinKeywords) "`$namespace`" else namespace}
+            package webhooks.$packageName
 
             import webhooks.Delivery
             import webhooks.WebhookHandler
@@ -75,7 +75,7 @@ private fun generateHandler(vendor: String, root: Path, output: (String) -> Unit
 
 internal fun loadHandler(vendor: String): WebhookHandler {
     require(vendorName.matches(vendor))
-    val type = Class.forName("webhooks.${namespace(vendor)}.Handler")
+    val type = Class.forName("webhooks.$vendor.Handler")
     return type.asSubclass(WebhookHandler::class.java).getDeclaredConstructor().newInstance().also {
         require(it.vendor == vendor) { "Generated handler vendor must match $vendor." }
     }
@@ -135,7 +135,6 @@ private fun serve(vendor: String, portArgument: String, root: Path, output: (Str
     return 0
 }
 
-private fun namespace(vendor: String) = vendor.replace('-', '_')
 private val kotlinKeywords = setOf(
     "as", "break", "class", "continue", "do", "else", "false", "for", "fun", "if", "in",
     "interface", "is", "null", "object", "package", "return", "super", "this", "throw",

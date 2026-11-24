@@ -5,7 +5,7 @@ import webhooks.ProcessingMode
 import webhooks.WebhookHandler
 
 class Handler : WebhookHandler {
-    override val vendor = "incident-alerts"
+    override val vendor = "incident_alerts"
     override val persistWebhooks = true
     override val processingMode = ProcessingMode.ASYNC_ARCHIVE
 

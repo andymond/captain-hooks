@@ -18,7 +18,7 @@ interface WebhookHandler {
     fun handle(delivery: Delivery)
 }
 
-internal val vendorName = Regex("[a-z][a-z0-9-]{0,62}")
+internal val vendorName = Regex("[a-z][a-z0-9_]{0,62}")
 private val deliveryId = Regex("[A-Za-z0-9._:-]{1,128}")
 private val signatureFormat = Regex("sha256=[A-Fa-f0-9]{64}")
 private const val MAX_BODY_BYTES = 1024 * 1024

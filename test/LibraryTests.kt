@@ -42,7 +42,7 @@ internal fun testLibrary() = withTempDirectory { directory ->
     }
     var handled = 0
     val handler = object : WebhookHandler {
-        override val vendor = "library-test"
+        override val vendor = "library_test"
         override val processingMode = ProcessingMode.ASYNC_ARCHIVE
         override val persistWebhooks = true
         override fun handle(delivery: Delivery) {

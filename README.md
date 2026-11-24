@@ -8,19 +8,19 @@ With JDK 17+ and `kotlinc` available, run:
 
 ```sh
 bash webhook test
-bash webhook generate my-vendor
-WEBHOOK_SECRET=demo-secret bash webhook serve my-vendor
+bash webhook generate my_vendor
+WEBHOOK_SECRET=demo-secret bash webhook serve my_vendor
 ```
 
-The generated handler lives at `src/webhooks/my_vendor/Handler.kt` and listens at `POST http://127.0.0.1:8080/webhooks/my-vendor`. It runs synchronously, uses local files for deduplication, and needs no database. The launcher can also find IntelliJ IDEA’s bundled compiler on macOS. Use `KOTLINC` to point to another compiler and `WEBHOOK_COROUTINES_JAR` if that distribution omits the coroutine JAR.
+The generated handler lives at `src/webhooks/my_vendor/Handler.kt` and listens at `POST http://127.0.0.1:8080/webhooks/my_vendor`. Vendor names start with a letter and use letters, digits, and underscores. The CLI lowercases the name for both the package and URL. The generated handler runs synchronously, uses local files for deduplication, and needs no database. The launcher can also find IntelliJ IDEA’s bundled compiler on macOS. Use `KOTLINC` to point to another compiler and `WEBHOOK_COROUTINES_JAR` if that distribution omits the coroutine JAR.
 
 ## Processing modes
 
 | Mode | How it runs | Example |
 | --- | --- | --- |
 | `SYNC` | Handles the verified body during the request. Enable `persistWebhooks` to archive it first. | Generated handlers |
-| `ASYNC_ARCHIVE` | Saves the original body and queues a reference. Requires `persistWebhooks = true` and a readable archive. | `incident-alerts` |
-| `ASYNC_PROJECTED` | Queues only the bytes returned by the handler’s `project` function. Raw archiving is optional. | `shipment-updates` |
+| `ASYNC_ARCHIVE` | Saves the original body and queues a reference. Requires `persistWebhooks = true` and a readable archive. | `incident_alerts` |
+| `ASYNC_PROJECTED` | Queues only the bytes returned by the handler’s `project` function. Raw archiving is optional. | `shipment_updates` |
 
 Async requests return `204` after the job is durably queued. Accepted duplicates also return `204`. Storage failures return `503` so the sender can retry. Workers retry with backoff and retain terminal failures. Use the delivery ID to make external side effects idempotent in case a worker retries after a crash or lease expiry.
 
@@ -41,7 +41,7 @@ Archives keep the first body for each vendor and delivery ID. The endpoint saves
 The CLI uses JDBC for both storage roles. Set `WEBHOOK_DATABASE_URL` and `WEBHOOK_JDBC_JAR`, plus `WEBHOOK_DATABASE_USER` and `WEBHOOK_DATABASE_PASSWORD` if required. The CLI selects the dialect from the URL and initializes its tables. The [SQL scripts](db/) show the PostgreSQL schema for applications that manage it separately.
 
 ```sh
-WEBHOOK_SECRET=demo-secret bash webhook serve incident-alerts
+WEBHOOK_SECRET=demo-secret bash webhook serve incident_alerts
 ```
 
 In another terminal, send a signed request. Run it twice with the same ID to see duplicate acknowledgment.
@@ -55,7 +55,7 @@ signature=$(printf '%s\n%s' "$id" "$body" |
 curl -i --data-binary "$body" \
   -H "X-Webhook-Delivery: $id" \
   -H "X-Webhook-Signature: sha256=$signature" \
-  http://127.0.0.1:8080/webhooks/incident-alerts
+  http://127.0.0.1:8080/webhooks/incident_alerts
 ```
 
 The signature covers the delivery ID, a newline byte, and the raw body. Use a stable ID containing 1–128 ASCII letters, digits, or characters from `._:-`.
