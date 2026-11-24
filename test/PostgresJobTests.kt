@@ -91,6 +91,16 @@ internal fun testPostgresJobs() {
         expire(shipment.id)
         check(jobs.claim(vendor, projected = true) == null)
         check(queryOne(stateSql, shipment.id) == "failed")
+
+        val externalId = "external-alert"
+        jobs.enqueueArchiveReference(vendor, externalId)
+        jobs.enqueueArchiveReference(vendor, externalId)
+        check(queryOne(bodySql, externalId) == null)
+        check(jobs.claim(vendor, projected = true) == null)
+        val external = checkNotNull(jobs.claim(vendor, projected = false))
+        check(external.externalArchive && external.delivery.id == externalId && external.delivery.body.isEmpty())
+        jobs.complete(external)
+        check(queryOne(stateSql, externalId) == "completed")
     } finally {
         connect().use { connection ->
             deleteVendor(connection, "webhook_jobs", vendor)

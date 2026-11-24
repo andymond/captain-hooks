@@ -42,6 +42,7 @@ fun main() {
     println("PASS CLI generation, validation, and overwrite protection")
     testEndpoint()
     testAsyncWebhooks()
+    testLibrary()
     testWebhookPersistence()
     testPostgresArchive()
     testPostgresJobs()

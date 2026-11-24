@@ -36,10 +36,13 @@ if [[ -n "${WEBHOOK_JDBC_JAR:-}" ]]; then
     fi
     classpath="$classpath:$WEBHOOK_JDBC_JAR"
 fi
-if [[ "${1:-}" == test ]]; then
-    "$compiler" src test -classpath "$coroutines_jar" -jvm-target 17 -include-runtime -d "$build_dir/webhook.jar"
+if [[ "${1:-}" == build-core ]]; then
+    mkdir -p target
+    "$compiler" library -classpath "$coroutines_jar" -jvm-target 17 -d target/captain-hooks-core.jar
+elif [[ "${1:-}" == test ]]; then
+    "$compiler" library src test -classpath "$coroutines_jar" -jvm-target 17 -include-runtime -d "$build_dir/webhook.jar"
     java -cp "$classpath" WebhookTestsKt
 else
-    "$compiler" src -classpath "$coroutines_jar" -jvm-target 17 -include-runtime -d "$build_dir/webhook.jar"
+    "$compiler" library src -classpath "$coroutines_jar" -jvm-target 17 -include-runtime -d "$build_dir/webhook.jar"
     java -cp "$classpath" MainKt "$@"
 fi

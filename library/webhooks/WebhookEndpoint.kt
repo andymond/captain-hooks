@@ -1,0 +1,150 @@
+package webhooks
+
+import java.io.InputStream
+import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.HexFormat
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
+
+data class Delivery(val id: String, val body: ByteArray)
+
+interface WebhookHandler {
+    val vendor: String
+    val persistWebhooks: Boolean get() = false
+    val processingMode: ProcessingMode get() = ProcessingMode.SYNC
+    fun handle(delivery: Delivery)
+}
+
+internal val vendorName = Regex("[a-z][a-z0-9-]{0,62}")
+private val deliveryId = Regex("[A-Za-z0-9._:-]{1,128}")
+private val signatureFormat = Regex("sha256=[A-Fa-f0-9]{64}")
+private const val MAX_BODY_BYTES = 1024 * 1024
+
+class WebhookEndpoint @JvmOverloads constructor(
+    private val handler: WebhookHandler,
+    secret: ByteArray,
+    dataDirectory: Path,
+    archive: WebhookArchive? = null,
+    jobs: WebhookJobs? = null
+) {
+    private val mode = handler.processingMode
+    private val queue = if (mode != ProcessingMode.SYNC) requireNotNull(jobs) else null
+    private val archive = archive.takeIf { handler.persistWebhooks }
+    private val readableArchive = this.archive as? ReadableWebhookArchive
+
+    init {
+        require(vendorName.matches(handler.vendor))
+        require(mode != ProcessingMode.ASYNC_ARCHIVE || handler.persistWebhooks)
+        require(mode != ProcessingMode.ASYNC_PROJECTED || handler is ProjectedWebhookHandler)
+        require(mode != ProcessingMode.SYNC || !handler.persistWebhooks || this.archive != null)
+        if (mode == ProcessingMode.ASYNC_ARCHIVE && this.archive != null) {
+            require(readableArchive != null) { "Async archive mode requires a readable archive." }
+            require(queue?.supportsExternalArchive == true) { "The job queue must support external archive references." }
+        }
+    }
+
+    val route = "/webhooks/${handler.vendor}"
+    private val key = SecretKeySpec(secret, "HmacSHA256")
+    private val store = if (mode == ProcessingMode.SYNC) DeliveryStore(dataDirectory.resolve(handler.vendor)) else null
+
+    /** Start the worker when the host starts and close it when the host stops. */
+    fun startWorker(): AutoCloseable? = queue?.let { WebhookWorker(handler, it, readableArchive).start() }
+
+    /** Route-facing entry point. Supply all values for each header to reject duplicates. */
+    fun handle(method: String, deliveryIds: List<String>, signatures: List<String>, body: InputStream): WebhookResponse {
+        val status = try {
+            receive(method, route, deliveryIds.singleOrNull(), signatures.singleOrNull(), body)
+        } catch (_: java.io.IOException) {
+            500
+        }
+        return WebhookResponse(status)
+    }
+
+    suspend fun handleAsync(
+        method: String, deliveryIds: List<String>, signatures: List<String>, body: InputStream
+    ): WebhookResponse = runInterruptible(Dispatchers.IO) { handle(method, deliveryIds, signatures, body) }
+
+    fun receive(method: String, path: String, id: String?, signature: String?, body: InputStream): Int {
+        if (path != route) return 404
+        if (method != "POST") return 405
+        if (id == null || !deliveryId.matches(id)) return 400
+        if (signature == null || !signatureFormat.matches(signature)) return 401
+        val payload = body.readNBytes(MAX_BODY_BYTES + 1)
+        if (payload.size > MAX_BODY_BYTES) return 413
+
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(key)
+        mac.update(id.toByteArray(Charsets.UTF_8))
+        mac.update(10.toByte())
+        val supplied = HexFormat.of().parseHex(signature.substringAfter('='))
+        if (!MessageDigest.isEqual(mac.doFinal(payload), supplied)) return 401
+
+        val delivery = Delivery(id, payload)
+        queue?.let { return enqueue(it, delivery) }
+        return try {
+            when (checkNotNull(store).process(id) {
+                try {
+                    archive?.save(handler.vendor, delivery)
+                } catch (failure: Exception) {
+                    throw WebhookArchiveUnavailable(failure)
+                }
+                handler.handle(delivery)
+            }) {
+                DeliveryStore.Result.PROCESSED, DeliveryStore.Result.DUPLICATE -> 204
+                DeliveryStore.Result.BUSY -> 503
+            }
+        } catch (failure: WebhookArchiveUnavailable) {
+            System.err.println("Webhook archive unavailable for ${handler.vendor} (${failure.cause?.javaClass?.simpleName})")
+            503
+        } catch (failure: Exception) {
+            System.err.println("Webhook processing failed for ${handler.vendor} (${failure.javaClass.simpleName})")
+            500
+        }
+    }
+    private fun enqueue(queue: WebhookJobs, delivery: Delivery): Int {
+        val projection = if (mode == ProcessingMode.ASYNC_PROJECTED) {
+            try {
+                (handler as ProjectedWebhookHandler).project(Delivery(delivery.id, delivery.body.copyOf())).also {
+                    require(it.size <= MAX_BODY_BYTES)
+                }
+            } catch (_: IllegalArgumentException) {
+                return try {
+                    if (queue.contains(handler.vendor, delivery.id)) 204 else 400
+                } catch (_: Exception) {
+                    503
+                }
+            } catch (failure: Exception) {
+                System.err.println("Webhook projection failed for ${handler.vendor} (${failure.javaClass.simpleName})")
+                return 500
+            }
+        } else null
+        return try {
+            if (archive == null) {
+                queue.enqueue(handler.vendor, delivery, projection, handler.persistWebhooks)
+            } else if (!queue.contains(handler.vendor, delivery.id)) {
+                archive.save(handler.vendor, delivery)
+                if (projection == null) queue.enqueueArchiveReference(handler.vendor, delivery.id)
+                else queue.enqueue(handler.vendor, delivery, projection, archive = false)
+            }
+            204
+        } catch (failure: Exception) {
+            System.err.println("Webhook enqueue failed for ${handler.vendor} (${failure.javaClass.simpleName})")
+            503
+        }
+    }
+
+}
+
+private class WebhookArchiveUnavailable(cause: Exception) : RuntimeException(cause)
+
+data class WebhookResponse(val status: Int) {
+    val headers: Map<String, String>
+        get() = when (status) {
+            405 -> mapOf("Allow" to "POST")
+            503 -> mapOf("Retry-After" to "1")
+            else -> emptyMap()
+        }
+}
