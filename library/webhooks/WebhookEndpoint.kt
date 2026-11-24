@@ -2,12 +2,9 @@ package webhooks
 
 import java.io.InputStream
 import java.nio.file.Path
-import java.security.MessageDigest
-import java.util.HexFormat
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
+import webhooks.signatures.CaptainHooksSignatureVerifier
 
 data class Delivery(val id: String, val body: ByteArray)
 
@@ -19,17 +16,26 @@ interface WebhookHandler {
 }
 
 internal val vendorName = Regex("[a-z][a-z0-9_]{0,62}")
-private val deliveryId = Regex("[A-Za-z0-9._:-]{1,128}")
-private val signatureFormat = Regex("sha256=[A-Fa-f0-9]{64}")
+internal val deliveryIdFormat = Regex("[A-Za-z0-9._:-]{1,128}")
 private const val MAX_BODY_BYTES = 1024 * 1024
 
 class WebhookEndpoint @JvmOverloads constructor(
     private val handler: WebhookHandler,
-    secret: ByteArray,
+    private val verifier: WebhookSignatureVerifier,
     receipts: DeliveryReceipts? = null,
     archive: WebhookArchive? = null,
     jobs: WebhookJobs? = null
 ) {
+    /** Uses the built-in signature format accepted by the CLI demos. */
+    @JvmOverloads
+    constructor(
+        handler: WebhookHandler,
+        secret: ByteArray,
+        receipts: DeliveryReceipts? = null,
+        archive: WebhookArchive? = null,
+        jobs: WebhookJobs? = null
+    ) : this(handler, CaptainHooksSignatureVerifier(secret), receipts, archive, jobs)
+
     /** Convenience constructor for applications using local filesystem receipts. */
     @JvmOverloads
     constructor(
@@ -61,40 +67,46 @@ class WebhookEndpoint @JvmOverloads constructor(
     }
 
     val route = "/webhooks/${handler.vendor}"
-    private val key = SecretKeySpec(secret, "HmacSHA256")
 
     /** Start the worker when the host starts and close it when the host stops. */
     fun startWorker(): AutoCloseable? = queue?.let { WebhookWorker(handler, it, readableArchive).start() }
 
-    /** Route-facing entry point. Supply all values for each header to reject duplicates. */
-    fun handle(method: String, deliveryIds: List<String>, signatures: List<String>, body: InputStream): WebhookResponse {
+    /** Route-facing entry point. Supply the raw body and all header values. */
+    fun handle(method: String, headers: Map<String, List<String>>, body: InputStream): WebhookResponse {
         val status = try {
-            receive(method, route, deliveryIds.singleOrNull(), signatures.singleOrNull(), body)
+            receive(method, route, headers, body)
         } catch (_: java.io.IOException) {
             500
         }
         return WebhookResponse(status)
     }
 
+    fun handle(method: String, deliveryIds: List<String>, signatures: List<String>, body: InputStream): WebhookResponse =
+        handle(method, demoHeaders(deliveryIds, signatures), body)
+
+    suspend fun handleAsync(
+        method: String, headers: Map<String, List<String>>, body: InputStream
+    ): WebhookResponse = runInterruptible(Dispatchers.IO) { handle(method, headers, body) }
+
     suspend fun handleAsync(
         method: String, deliveryIds: List<String>, signatures: List<String>, body: InputStream
-    ): WebhookResponse = runInterruptible(Dispatchers.IO) { handle(method, deliveryIds, signatures, body) }
+    ): WebhookResponse = handleAsync(method, demoHeaders(deliveryIds, signatures), body)
 
-    fun receive(method: String, path: String, id: String?, signature: String?, body: InputStream): Int {
+    fun receive(method: String, path: String, id: String?, signature: String?, body: InputStream): Int =
+        receive(method, path, demoHeaders(listOfNotNull(id), listOfNotNull(signature)), body)
+
+    fun receive(method: String, path: String, headers: Map<String, List<String>>, body: InputStream): Int {
         if (path != route) return 404
         if (method != "POST") return 405
-        if (id == null || !deliveryId.matches(id)) return 400
-        if (signature == null || !signatureFormat.matches(signature)) return 401
         val payload = body.readNBytes(MAX_BODY_BYTES + 1)
         if (payload.size > MAX_BODY_BYTES) return 413
 
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(key)
-        mac.update(id.toByteArray(Charsets.UTF_8))
-        mac.update(10.toByte())
-        val supplied = HexFormat.of().parseHex(signature.substringAfter('='))
-        if (!MessageDigest.isEqual(mac.doFinal(payload), supplied)) return 401
-
+        val id = when (val result = verifier.verify(headers, payload.copyOf())) {
+            SignatureVerification.InvalidSignature -> return 401
+            SignatureVerification.InvalidDelivery -> return 400
+            is SignatureVerification.Verified -> result.deliveryId
+        }
+        if (!deliveryIdFormat.matches(id)) return 400
         val delivery = Delivery(id, payload)
         queue?.let { return enqueue(it, delivery) }
         return try {
@@ -155,6 +167,9 @@ class WebhookEndpoint @JvmOverloads constructor(
     }
 
 }
+
+private fun demoHeaders(deliveryIds: List<String>, signatures: List<String>): Map<String, List<String>> =
+    mapOf("X-Webhook-Delivery" to deliveryIds, "X-Webhook-Signature" to signatures)
 
 private class WebhookHandlerFailure(cause: Exception) : RuntimeException(cause)
 
