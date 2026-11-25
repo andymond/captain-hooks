@@ -1,7 +1,5 @@
 # Captain Hooks
 
-[![CI](https://github.com/andymond/captain-hooks/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/andymond/captain-hooks/actions/workflows/ci.yml)
-
 A Kotlin/JVM library for receiving signed webhooks, deduplicating deliveries, and running handlers in the background. Use the CLI to scaffold a handler or embed it in Spring MVC, Spring Boot, or Ktor.
 
 ## Quick start
@@ -24,13 +22,7 @@ The generated handler lives at `src/webhooks/my_vendor/Handler.kt` and listens a
 | `ASYNC_ARCHIVE` | Saves the original body and queues a reference. Requires `persistWebhooks = true` and a readable archive. | `incident_alerts` |
 | `ASYNC_PROJECTED` | Queues only the bytes returned by the handler’s `project` function. Raw archiving is optional. | `shipment_updates` |
 
-## Design notes
-
-Delivery is at least once. Async requests return `204` after durable enqueue, and a duplicate of an accepted job returns `204` without starting a new job. Storage failures return `503` so the sender can retry. Worker leases prevent simultaneous claims during the lease. A crash after an external side effect can still cause a retry, so use the delivery ID as an idempotency key.
-
-Sync mode suits short handlers when the sender should see handling failures directly. Archive mode retains the original bytes for later handling or replay, which adds storage and retention costs. Projected mode keeps the queue payload small and can avoid retaining sensitive fields. Its projection runs on the request path and must retain everything the worker will need.
-
-Archive and queue adapters can use different databases. The archive write comes first. If enqueue fails, the original stays available and a retry can safely reuse it.
+Async requests return `204` after the job is durably queued. Accepted duplicates also return `204`. Storage failures return `503` so the sender can retry. Workers retry with backoff and retain terminal failures. Use the delivery ID to make external side effects idempotent in case a worker retries after a crash or lease expiry.
 
 ## Choose storage
 
@@ -38,7 +30,7 @@ Choose the archive and job queue independently. Applications supply and own thei
 
 | Backend | Archive | Job queue | Setup |
 | --- | --- | --- | --- |
-| JDBC | `JdbcWebhookArchive(dataSource, dialect)` | `JdbcWebhookJobs(dataSource, dialect)` | PostgreSQL has live tests. MySQL, MariaDB, H2, and SQLite are experimental. Supply a JDBC driver and `JdbcDialect`, then call `createSchema()` or apply equivalent migrations. |
+| JDBC | `JdbcWebhookArchive(dataSource, dialect)` | `JdbcWebhookJobs(dataSource, dialect)` | Supply a JDBC driver and `JdbcDialect` for PostgreSQL, MySQL, MariaDB, H2, or SQLite. Call `createSchema()` or apply equivalent migrations. |
 | Redis | `RedisWebhookArchive(redis)` | `RedisWebhookJobs(redis)` | Supply an application-managed Jedis client. Configure persistence and protect the keys from eviction. |
 | MongoDB | `MongoWebhookArchive(collection)` | `MongoWebhookJobs(collection)` | Use separate collections with acknowledged writes. Call `createIndexes()` on the queue during setup. |
 
@@ -66,30 +58,56 @@ curl -i --data-binary "$body" \
   http://127.0.0.1:8080/webhooks/incident_alerts
 ```
 
-The signature covers the delivery ID, a newline byte, and the raw body. Use a stable ID containing 1–128 ASCII letters, digits, or characters from `._:-`.
+The demo signature covers the delivery ID, a newline byte, and the raw body. Use a stable ID containing 1–128 ASCII letters, digits, or characters from `._:-`.
+
+## Use a provider's signature scheme
+
+Implement `WebhookSignatureVerifier` with your provider's SDK. The verifier receives the original request bytes and all header values, and returns an authenticated delivery ID for deduplication. Captain Hooks' demo verifier compares fixed-size HMAC digests with [`MessageDigest.isEqual`](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/security/MessageDigest.html#isEqual(byte%5B%5D,byte%5B%5D)).
+
+For example, an application using the [Stripe Java SDK](https://docs.stripe.com/webhooks/signature) can verify the header and read the event ID with its existing JSON parser:
+
+```kotlin
+import com.stripe.exception.SignatureVerificationException
+import com.stripe.net.Webhook
+import java.io.IOException
+import webhooks.SignatureVerification
+import webhooks.WebhookSignatureVerifier
+
+val verifier = WebhookSignatureVerifier { headers, rawBody ->
+    val signature = headers.filterKeys { it.equals("Stripe-Signature", ignoreCase = true) }
+        .values.flatten().singleOrNull()
+        ?: return@WebhookSignatureVerifier SignatureVerification.InvalidSignature
+
+    try {
+        val payload = rawBody.decodeToString(throwOnInvalidSequence = true)
+        if (!Webhook.Signature.verifyHeader(payload, signature, stripeEndpointSecret, 300L)) {
+            return@WebhookSignatureVerifier SignatureVerification.InvalidSignature
+        }
+        val id = objectMapper.readTree(rawBody)?.path("id")?.textValue()
+        if (id.isNullOrBlank()) SignatureVerification.InvalidDelivery
+        else SignatureVerification.Verified(id)
+    } catch (_: SignatureVerificationException) {
+        SignatureVerification.InvalidSignature
+    } catch (_: IOException) {
+        SignatureVerification.InvalidDelivery
+    }
+}
+```
+
+Pass it as `WebhookEndpoint(handler, verifier, receipts = receipts)` for a synchronous handler. The application supplies `stripeEndpointSecret`, its JSON mapper, and the Stripe SDK dependency.
 
 ## Embed in Spring or Ktor
 
-Run `mvn -DskipITs install` from the repository root to install the modules locally without Docker. Gradle consumers can add `mavenLocal()`. All artifacts use group `io.github.andymond` and version `0.1.0-SNAPSHOT`.
+Run `mvn install` and depend on `io.github.andymond:captain-hooks:0.1.0-SNAPSHOT` from your local Maven repository. Gradle consumers can add `mavenLocal()`. Add Jedis or the MongoDB Java driver if you use those adapters.
 
-| Artifact | Include when |
-| --- | --- |
-| `captain-hooks` | You use the core API with local receipts or application-supplied adapters. |
-| `captain-hooks-jdbc` | You want the JDBC archive or queue. Supply your database driver. Example SQL is packaged with this artifact. |
-| `captain-hooks-redis` | You want the Redis archive or queue. This artifact brings in Jedis. |
-| `captain-hooks-mongo` | You want the MongoDB archive or queue. This artifact brings in the MongoDB Java driver. |
-
-Each backend artifact brings in the core automatically. Include multiple adapters when your archive and queue use different backends.
-
-Create a `WebhookEndpoint(handler, secret, receipts = receipts, archive = archive, jobs = jobs)` with the storage your handler needs. For synchronous handling, pass a `DeliveryReceipts` implementation backed by your infrastructure or use `FileDeliveryReceipts(path)`. Your receipt adapter claims each vendor and delivery ID atomically and marks completion only after the handler succeeds. Async handlers use their queue for deduplication. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all values of each signature header and the original request stream.
+Create a `WebhookEndpoint(handler, secret, receipts = receipts, archive = archive, jobs = jobs)` with the storage your handler needs. For synchronous handling, pass a `DeliveryReceipts` implementation backed by your infrastructure or use `FileDeliveryReceipts(path)`. Your receipt adapter claims each vendor and delivery ID atomically and marks completion only after the handler succeeds. Async handlers use their queue for deduplication. For async handlers, start `endpoint.startWorker()` at application startup and close the returned handle at shutdown. Pass all request headers and the original body stream to the verifier.
 
 **Spring MVC or Spring Boot** registers the endpoint as a bean. Inside the controller, forward the request to the blocking API:
 
 ```kotlin
 val result = endpoint.handle(
     request.method,
-    request.getHeaders("X-Webhook-Delivery").toList(),
-    request.getHeaders("X-Webhook-Signature").toList(),
+    request.headerNames.toList().associateWith { request.getHeaders(it).toList() },
     request.inputStream
 )
 return ResponseEntity.status(result.status).apply {
@@ -103,8 +121,7 @@ return ResponseEntity.status(result.status).apply {
 val result = call.receiveChannel().toInputStream().use { body ->
     endpoint.handleAsync(
         "POST",
-        call.request.headers.getAll("X-Webhook-Delivery").orEmpty(),
-        call.request.headers.getAll("X-Webhook-Signature").orEmpty(),
+        call.request.headers.entries().associate { it.key to it.value },
         body
     )
 }
@@ -114,9 +131,8 @@ call.respond(HttpStatusCode.fromValue(result.status))
 
 ## Verification
 
-- Run `mvn clean verify` with Docker running. Testcontainers starts PostgreSQL, Redis, and MongoDB and the tests set up their own schemas. The Actions workflow supplies PostgreSQL as a service and uses Testcontainers for Redis and MongoDB.
-- Run `bash webhook test` for fast core and CLI checks without Docker.
-- Run `mvn package` to build artifacts without starting the integration-test containers.
-Core contracts live in [library/webhooks](library/webhooks). Storage implementations live in [adapters/archive](adapters/archive) and [adapters/jobs](adapters/jobs). The [CLI and demo handlers](src) are separate from the library.
+- `mvn clean verify` builds the full library. `bash webhook test` runs the project’s core and CLI tests.
+- For live JDBC tests, configure the driver and credentials, create the archive schema in a test database, and run `WEBHOOK_TEST_DATABASE_URL="$WEBHOOK_DATABASE_URL" bash webhook test`. Look for the archive and JDBC job storage PASS messages.
+- For live Redis or MongoDB checks, wire the adapters into a host and send a duplicate signed request. Expect two `204` responses, one completed job, and one archived body in archive mode.
 
-Licensed under the [MIT License](LICENSE).
+Core contracts live in [library/webhooks](library/webhooks). Storage implementations live in [adapters/archive](adapters/archive) and [adapters/jobs](adapters/jobs). The [CLI and demo handlers](src) are separate from the library.
