@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: captain_hooks_test
+          POSTGRES_USER: captain_hooks
+          POSTGRES_PASSWORD: captain_hooks
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U captain_hooks -d captain_hooks_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CAPTAIN_HOOKS_TEST_POSTGRES_URL: jdbc:postgresql://127.0.0.1:5432/captain_hooks_test
+      CAPTAIN_HOOKS_TEST_POSTGRES_USER: captain_hooks
+      CAPTAIN_HOOKS_TEST_POSTGRES_PASSWORD: captain_hooks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Verify reactor and storage adapters
+        run: mvn -B clean verify
